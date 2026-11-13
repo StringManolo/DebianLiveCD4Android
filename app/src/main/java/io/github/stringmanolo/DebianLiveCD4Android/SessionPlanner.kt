@@ -18,7 +18,7 @@ class Plan(
  * Storage areas never interfere with each other:
  *  - System   files/rootfs/system          written only by SYSTEM + NORMAL (and its one-time install)
  *  - LiveCD   files/rootfs/livecd-persist  written only by LIVECD + NORMAL
- *  - temp     files/eph/*                  EPHEMERAL runs only; wiped on exit / next launch
+ *  - temp     files/eph/<id>                EPHEMERAL runs only; wiped on exit / next launch
  *  - VM       nothing on disk
  * Nothing is ever installed implicitly: System + EPHEMERAL/VM require an already installed System.
  * The only cross-access is explicit: a LiveCD session (proot modes) may bind the installed System at
