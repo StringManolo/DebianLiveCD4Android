@@ -1,5 +1,5 @@
-A clean, base template for Android development in Kotlin. Start coding now!
-You can make your own apps using this code!
+A Termux alternative that gives you a real Debian userland on Android.
 
-
-
+- Debian under proot, using the official Debian rootfs
+- Floating-terminal-friendly UI with ESC/TAB/CTRL/ALT/HOME/END/arrow keys
+- System and LiveCD environments, each in three modes: Normal (persistent), Ephemeral (wiped on exit) and VM (QEMU, RAM only)

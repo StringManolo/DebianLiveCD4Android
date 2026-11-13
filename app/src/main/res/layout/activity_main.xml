@@ -1,14 +1,64 @@
 <?xml version="1.0" encoding="utf-8"?>
-<RelativeLayout 
-  xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
   android:layout_width="match_parent"
   android:layout_height="match_parent"
-  android:gravity="center">
+  android:background="@color/dlc_bg"
+  android:orientation="vertical">
 
-  <TextView
-    android:layout_width="wrap_content"
-    android:layout_height="wrap_content"
-    android:text="Hello Kotlin!"
-    android:textSize="24sp" />
+  <FrameLayout
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_weight="1">
 
-</RelativeLayout>
+    <com.termux.view.TerminalView
+      android:id="@+id/terminal_view"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"
+      android:focusable="true"
+      android:focusableInTouchMode="true" />
+
+    <TextView
+      android:id="@+id/btn_settings"
+      android:layout_width="40dp"
+      android:layout_height="40dp"
+      android:layout_gravity="top|end"
+      android:alpha="0.45"
+      android:gravity="center"
+      android:text="⚙"
+      android:textColor="@color/dlc_text"
+      android:textSize="20sp" />
+
+    <LinearLayout
+      android:id="@+id/install_panel"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"
+      android:background="@color/dlc_bg"
+      android:gravity="center"
+      android:orientation="vertical"
+      android:padding="24dp"
+      android:visibility="gone">
+
+      <TextView
+        android:id="@+id/install_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:text="@string/preparing"
+        android:textColor="@color/dlc_text"
+        android:textSize="13sp" />
+
+      <ProgressBar
+        android:id="@+id/install_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:max="100" />
+    </LinearLayout>
+  </FrameLayout>
+
+  <io.github.stringmanolo.DebianLiveCD4Android.ExtraKeysView
+    android:id="@+id/extra_keys"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content" />
+</LinearLayout>

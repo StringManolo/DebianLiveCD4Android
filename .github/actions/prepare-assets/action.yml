@@ -1,0 +1,32 @@
+name: Prepare proot / QEMU / rootfs assets
+description: Downloads proot, (optionally) QEMU + VM boot assets and the official Debian rootfs, and places them where Gradle packages them.
+inputs:
+  with-vm:
+    description: "Also build the VM-mode assets (adds roughly 60-100 MB to the APK)"
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq patchelf binutils xz-utils cpio zstd
+    - name: proot (termux/proot fork, from the Termux repo)
+      shell: bash
+      run: |
+        python3 bash/termux_fetch.py --clean --pkg proot \
+          --bin usr/bin/proot=libproot.so \
+          --bin usr/libexec/proot/loader=libproot-loader.so \
+          --bin 'usr/libexec/proot/loader32=libproot-loader32.so?'
+    - name: QEMU + VM boot assets
+      if: inputs.with-vm == 'true'
+      shell: bash
+      run: |
+        python3 bash/termux_fetch.py --pkg qemu-system-aarch64-headless \
+          --bin usr/bin/qemu-system-aarch64=libqemu.so
+        python3 bash/build_vm_assets.py
+    - name: Debian rootfs (livecd image)
+      shell: bash
+      run: bash bash/fetch-rootfs.sh
+    - uses: actions/upload-artifact@v4
+      with:
+        name: provenance
+        path: build-info/

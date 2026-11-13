@@ -1,0 +1,46 @@
+#!/bin/busybox sh
+# PID 1 of the VM initramfs: receive the rootfs into a tmpfs (RAM), then hand over to it.
+/bin/busybox --install -s /bin
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+for m in failover net_failover virtio_mmio virtio_console virtio_net; do
+  [ -e /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
+done
+
+i=0
+while [ ! -e /dev/vport0p1 ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
+[ -e /dev/vport0p1 ] || { echo "[dlc] rootfs channel not found"; echo o > /proc/sysrq-trigger; sleep 5; }
+
+mount -t tmpfs -o size=90%,mode=755 tmpfs /newroot
+echo "[dlc] receiving rootfs into RAM..."
+tar -x -C /newroot -f /dev/vport0p1 || echo "[dlc] tar reported errors"
+[ -x /newroot/bin/sh ] || { echo "[dlc] rootfs looks empty"; echo o > /proc/sysrq-trigger; sleep 5; }
+
+# user-mode (slirp) networking
+ip link set lo up
+if ip link show eth0 >/dev/null 2>&1; then
+  ip link set eth0 up
+  ip addr add 10.0.2.15/24 dev eth0
+  ip route add default via 10.0.2.2
+  echo "nameserver 10.0.2.3" > /newroot/etc/resolv.conf
+fi
+
+mkdir -p /newroot/proc /newroot/sys /newroot/dev
+mount --move /proc /newroot/proc
+mount --move /sys /newroot/sys
+mount --move /dev /newroot/dev
+mkdir -p /newroot/dev/pts /newroot/dev/shm
+mount -t devpts devpts /newroot/dev/pts
+mount -t tmpfs tmpfs /newroot/dev/shm
+
+echo "[dlc] booting. Tip: run 'stty rows N cols M' to match your screen."
+exec switch_root /newroot /bin/sh -c '
+export HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+cd /root
+setsid -c /bin/bash --login
+echo o > /proc/sysrq-trigger
+'

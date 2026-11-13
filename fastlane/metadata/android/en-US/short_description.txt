@@ -1,1 +1,1 @@
-HelloWorld: Example APP Showcase Kotlin APK Template 
+Debian on Android via proot or a RAM-only QEMU VM. A Termux alternative for advanced users.

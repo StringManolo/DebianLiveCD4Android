@@ -1,9 +1,12 @@
-# TODO:
+# TODO
 
-List of pending changes.
-
-- Add script to check project status (missing files);
-- Add script to integrate all scripts in a single cli tool
-- Cli tool asks for app details and renames paths and files (if user wants)
-- Add wiki to explain for example different allowed icons
-- Upload demo making a new repo with he template and a new app from 0
+- [ ] First green Actions build (fix compile errors; Termux terminal API signatures were written from memory)
+- [ ] Verify proot starts Debian on a real device (seccomp / `PROOT_NO_SECCOMP` fallback)
+- [ ] Verify VM mode on a real device (kernel image format, virtio modules, TCG JIT permissions)
+- [ ] Floating window like Vphonegaga: drag, free resize, rotate, pin, opacity, minimize to notification
+- [ ] Restyle the terminal (colour scheme, font) for advanced users
+- [ ] Install other rootfs: import any tarball / URL + small catalog (Ubuntu, Alpine, Arch ARM...)
+- [ ] Simulated "partitions": soft size quotas per volume
+- [ ] Compressed system (tar.zst at rest, unpack on start)
+- [ ] VM: propagate terminal size to the guest
+- [ ] Optionally build proot from source in the workflow instead of using the Termux package

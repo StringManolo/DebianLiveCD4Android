@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="@color/dlc_bg">
+
+  <LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+      style="@android:style/TextAppearance.Material.Subhead"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:text="Environment" />
+
+    <RadioGroup
+      android:id="@+id/group_target"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+      <RadioButton android:id="@+id/rb_system" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="System (installed Debian)" />
+      <RadioButton android:id="@+id/rb_livecd" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="LiveCD (image shipped in the APK)" />
+    </RadioGroup>
+
+    <TextView
+      style="@android:style/TextAppearance.Material.Subhead"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="16dp"
+      android:text="Mode" />
+
+    <RadioGroup
+      android:id="@+id/group_mode"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content">
+      <RadioButton android:id="@+id/rb_normal" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Normal (persistent on disk)" />
+      <RadioButton android:id="@+id/rb_ephemeral" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Ephemeral (temporary copy, wiped on exit)" />
+      <RadioButton android:id="@+id/rb_vm" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="VM (QEMU, RAM only)" />
+    </RadioGroup>
+
+    <TextView
+      android:id="@+id/mode_help"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="8dp"
+      android:textSize="13sp" />
+
+    <TextView
+      style="@android:style/TextAppearance.Material.Subhead"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="16dp"
+      android:text="VM options" />
+
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="RAM (MB)" />
+    <Spinner android:id="@+id/spin_ram" android:layout_width="match_parent" android:layout_height="wrap_content" />
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="CPU cores" />
+    <Spinner android:id="@+id/spin_cpus" android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+    <CheckBox
+      android:id="@+id/cb_wipe"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="16dp"
+      android:text="Overwrite files with zeros before deleting (ephemeral mode)" />
+
+    <Button
+      android:id="@+id/btn_apply"
+      android:layout_width="match_parent"
+      android:layout_height="wrap_content"
+      android:layout_marginTop="24dp"
+      android:text="Apply and restart session" />
+  </LinearLayout>
+</ScrollView>
