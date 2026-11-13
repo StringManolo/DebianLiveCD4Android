@@ -17,7 +17,11 @@ trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 # -6 keeps the xz dictionary at 8 MiB so decompression fits comfortably in the app's heap
 docker export "$cid" | xz -T0 -6 > "$FILE"
 
-tar -tJf "$FILE" | grep -qE '(^|/)usr/bin/env$' || { echo "rootfs looks wrong (no usr/bin/env)"; exit 1; }
+# list to a file first: `tar | grep -q` dies with SIGPIPE under pipefail even when the match exists
+tar -tJf "$FILE" > /tmp/rootfs.list
+ls /tmp/rootfs.list
+grep -qE '(^|/)usr/bin/env$' /tmp/rootfs.list || { echo "rootfs looks wrong (no usr/bin/env)"; head -20 /tmp/rootfs.list; exit 1; }
+echo "rootfs entries: $(wc -l < /tmp/rootfs.list)"
 {
   echo "image: $IMAGE (linux/arm64)"
   echo "digest: $digest"
