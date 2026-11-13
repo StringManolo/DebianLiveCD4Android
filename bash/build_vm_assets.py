@@ -102,6 +102,19 @@ def main():
     ASSETS.mkdir(parents=True, exist_ok=True)
     (ASSETS / "Image").write_bytes(blob)
 
+    # kernel config sanity: the init script needs these (module or built-in)
+    cfg = next(iter(sorted((kx / "boot").glob("config-*"))), None)
+    if cfg:
+        text = cfg.read_text()
+        for sym in ("VIRTIO", "VIRTIO_MMIO", "VIRTIO_CONSOLE", "VIRTIO_NET", "FAILOVER", "NET_FAILOVER",
+                    "DEVTMPFS", "TMPFS", "SERIAL_AMBA_PL011_CONSOLE", "MAGIC_SYSRQ", "BLK_DEV_INITRD"):
+            m = re.search(rf"^CONFIG_{sym}=(\w+)", text, re.M)
+            print(f"  CONFIG_{sym} = {m.group(1) if m else 'not set'}")
+        for sym in ("VIRTIO_CONSOLE", "SERIAL_AMBA_PL011_CONSOLE", "BLK_DEV_INITRD"):
+            m = re.search(rf"^CONFIG_{sym}=(\w+)", text, re.M)
+            if not m:
+                sys.exit(f"kernel lacks CONFIG_{sym}: the VM cannot work with this kernel")
+
     # initramfs tree
     ir = work / "ir"
     for d in ("bin", "dev", "proc", "sys", "lib/modules", "newroot", "etc"):
