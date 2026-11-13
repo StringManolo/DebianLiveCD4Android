@@ -19,7 +19,6 @@ docker export "$cid" | xz -T0 -6 > "$FILE"
 
 # list to a file first: `tar | grep -q` dies with SIGPIPE under pipefail even when the match exists
 tar -tJf "$FILE" > /tmp/rootfs.list
-ls /tmp/rootfs.list
 grep -qE '(^|/)usr/bin/env$' /tmp/rootfs.list || { echo "rootfs looks wrong (no usr/bin/env)"; head -20 /tmp/rootfs.list; exit 1; }
 echo "rootfs entries: $(wc -l < /tmp/rootfs.list)"
 {

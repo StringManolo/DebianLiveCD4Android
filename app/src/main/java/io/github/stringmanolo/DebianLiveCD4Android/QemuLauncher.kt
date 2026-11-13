@@ -11,10 +11,30 @@ object QemuLauncher {
 
     private fun hasAsset(ctx: Context, name: String) = try { ctx.assets.open(name).close(); true } catch (e: Exception) { false }
 
+    /** What is missing for VM mode (empty = available). Shown in the settings screen. */
+    fun missingParts(ctx: Context): List<String> {
+        val m = ArrayList<String>()
+        if (!File(Paths.nativeLibDir(ctx), "libqemu.so").exists()) m += "libqemu.so"
+        if (!hasAsset(ctx, "vm/Image")) m += "asset vm/Image"
+        if (!hasAsset(ctx, "vm/initramfs.cpio.gz")) m += "asset vm/initramfs.cpio.gz"
+        return m
+    }
+
     /** True only if this build shipped QEMU, the kernel and the initramfs (see .github/actions/prepare-assets). */
-    fun available(ctx: Context): Boolean =
-        File(Paths.nativeLibDir(ctx), "libqemu.so").exists() &&
-            hasAsset(ctx, "vm/Image") && hasAsset(ctx, "vm/initramfs.cpio.gz")
+    fun available(ctx: Context): Boolean = missingParts(ctx).isEmpty()
+
+    fun diagnose(ctx: Context): String {
+        val lib = File(Paths.nativeLibDir(ctx))
+        val q = File(lib, "libqemu.so")
+        val p = File(lib, "libproot.so")
+        fun yn(b: Boolean) = if (b) "yes" else "NO"
+        return "nativeLibraryDir: ${lib.path} (${lib.list()?.size ?: -1} files)\n" +
+            "libproot.so: ${yn(p.exists())}\n" +
+            "libqemu.so: ${if (q.exists()) "yes (${q.length() / 1024} KB)" else "NO"}\n" +
+            "asset vm/Image: ${yn(hasAsset(ctx, "vm/Image"))}\n" +
+            "asset vm/initramfs.cpio.gz: ${yn(hasAsset(ctx, "vm/initramfs.cpio.gz"))}\n" +
+            "asset rootfs/debian-arm64.tar.xz: ${yn(hasAsset(ctx, Paths.ROOTFS_ASSET))}"
+    }
 
     /** Kernel and initramfs must be real files for QEMU; they are not secret, so they may live on disk. */
     fun prepareFiles(ctx: Context): File {

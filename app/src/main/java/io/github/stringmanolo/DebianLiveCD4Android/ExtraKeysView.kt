@@ -25,11 +25,13 @@ class ExtraKeysView @JvmOverloads constructor(
     var sessionProvider: (() -> TerminalSession?)? = null
 
     private val handler = Handler(Looper.getMainLooper())
-    private val colKey = Color.parseColor("#1B222A")
-    private val colPressed = Color.parseColor("#2A3440")
-    private val colOnce = Color.parseColor("#2F6F4F")
-    private val colLock = Color.parseColor("#8A5A1C")
-    private val colText = Color.parseColor("#C9D1D9")
+    private var colPanel = Color.parseColor("#12171C")
+    private var colKey = Color.parseColor("#1B222A")
+    private var colPressed = Color.parseColor("#2A3440")
+    private var colOnce = Color.parseColor("#2F6F4F")
+    private var colLock = Color.parseColor("#8A5A1C")
+    private var colText = Color.parseColor("#C9D1D9")
+    private val plainButtons = ArrayList<Button>()
 
     private var ctrl = Mod.OFF
     private var alt = Mod.OFF
@@ -38,7 +40,7 @@ class ExtraKeysView @JvmOverloads constructor(
 
     init {
         orientation = VERTICAL
-        setBackgroundColor(Color.parseColor("#12171C"))
+        setBackgroundColor(colPanel)
 
         ctrlButton = modButton("CTRL", { ctrl }, { ctrl = it })
         altButton = modButton("ALT", { alt }, { alt = it })
@@ -53,6 +55,19 @@ class ExtraKeysView @JvmOverloads constructor(
             key("←", true) { cursorSeq('D') }, key("↓", true) { cursorSeq('B') },
             key("→", true) { cursorSeq('C') }, key("PGDN", true) { tildeSeq(6) }
         )
+    }
+
+    /** Derive the bar's colours from the terminal theme (bg = terminal background, fg = terminal foreground). */
+    fun applyTheme(bgColor: Int, fg: Int) {
+        colPanel = blend(bgColor, fg, 0.06f)
+        colKey = blend(bgColor, fg, 0.14f)
+        colPressed = blend(bgColor, fg, 0.26f)
+        colText = fg
+        setBackgroundColor(colPanel)
+        for (b in plainButtons) { b.background = bg(colKey); b.setTextColor(colText) }
+        ctrlButton.setTextColor(colText)
+        altButton.setTextColor(colText)
+        refreshMods()
     }
 
     fun consumeCtrl(): Boolean {
@@ -122,6 +137,7 @@ class ExtraKeysView @JvmOverloads constructor(
 
     private fun key(label: String, repeat: Boolean = false, seq: () -> String): Button {
         val b = button(label)
+        plainButtons.add(b)
         if (!repeat) {
             b.setOnClickListener { fire(seq) }
             return b

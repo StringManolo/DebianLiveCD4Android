@@ -8,7 +8,10 @@ import java.io.FileInputStream
 
 object ProotLauncher {
 
-    fun createSession(ctx: Context, rootDir: File, client: TerminalSessionClient): TerminalSession {
+    fun createSession(
+        ctx: Context, rootDir: File, client: TerminalSessionClient,
+        extraBinds: List<Pair<String, String>> = emptyList()
+    ): TerminalSession {
         val lib = Paths.nativeLibDir(ctx)
         val root = rootDir.absolutePath
         val tmp = Paths.tmpDir(ctx).apply { mkdirs() }
@@ -25,6 +28,7 @@ object ProotLauncher {
             "-b", "$root/tmp:/dev/shm"
         )
         for ((name, f) in fakeProc(ctx)) args += listOf("-b", "${f.absolutePath}:/proc/$name")
+        for ((host, guest) in extraBinds) args += listOf("-b", "$host:$guest")
         args += listOf(
             "-w", "/root",
             "/usr/bin/env", "-i",

@@ -13,23 +13,29 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 
 /**
- * Foreground service that prepares the environment (install / extract / copy / VM feeder), owns the
- * terminal session so it survives the Activity, and cleans up (wipes ephemeral data) afterwards.
+ * Foreground service: prepares the environment (install / extract / copy / VM feeder), owns the terminal
+ * session so it survives the Activity, hosts the floating window, and cleans up (wipes ephemeral data).
  */
-class TerminalService : Service(), TerminalSessionClient {
+class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
 
     interface Listener {
         fun onProgress(percent: Int, message: String)
+        /** Fullscreen presentation: attach the session to the Activity's view. */
         fun onSessionReady(session: TerminalSession)
+        /** The floating window took over; the Activity can close. */
+        fun onFloatingShown()
+        fun onNeedOverlayPermission()
         fun onFailed(message: String)
         fun onScreenChanged()
         fun onColorsChanged()
         fun onSessionFinished()
+        fun onAppearanceChanged(cfg: AppConfig)
     }
 
     inner class LocalBinder : Binder() { val service: TerminalService get() = this@TerminalService }
@@ -48,26 +54,33 @@ class TerminalService : Service(), TerminalSessionClient {
         private set
 
     private var cleanup: (() -> Unit)? = null
+    private var floating: FloatingWindow? = null
+    private var minimized = false
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
-        startForegroundWithNotification()
+        startForeground(NOTIF_ID, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_EXIT) {
-            listener?.onSessionFinished()
-            stopCurrent { stopForeground(true); stopSelf() } // stays foreground until cleanup/wipe is done
+        when (intent?.action) {
+            ACTION_EXIT -> exitAll()
+            ACTION_MINIMIZE -> hostMinimize()
+            ACTION_RESTORE -> { minimized = false; present(true) }
+            ACTION_APPLY -> applyConfig(intent.getBooleanExtra(EXTRA_RESTART, false))
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        floating?.hide()
         session?.finishIfRunning()
         super.onDestroy()
     }
+
+    // ------------------------------------------------------------------ lifecycle
 
     /** (Re)starts the environment described by [cfg]. Any running session is stopped first. */
     fun launch(cfg: AppConfig) {
@@ -76,6 +89,7 @@ class TerminalService : Service(), TerminalSessionClient {
         preparing = true
         lastError = null
         lastProgress = 0 to "Preparing…"
+        updateNotification()
         Thread {
             var plan: Plan? = null
             try {
@@ -87,11 +101,13 @@ class TerminalService : Service(), TerminalSessionClient {
                 main.post {
                     try {
                         val s = p.createSession(this)
+                        Themes.apply(Themes.byId(cfg.themeId), s)
                         session = s
                         cleanup = p.cleanup
                         preparing = false
                         lastProgress = null
-                        listener?.onSessionReady(s)
+                        minimized = false
+                        present(false)
                     } catch (t: Throwable) {
                         fail(p, t)
                     }
@@ -107,9 +123,10 @@ class TerminalService : Service(), TerminalSessionClient {
         Log.e("TerminalService", "launch failed", t)
         preparing = false
         lastProgress = null
-        lastError = "${t.javaClass.simpleName}: ${t.message}"
+        lastError = t.message ?: t.javaClass.simpleName
         cleanup = plan?.cleanup
         runCleanup {}
+        updateNotification()
         listener?.onFailed(lastError!!)
     }
 
@@ -131,36 +148,140 @@ class TerminalService : Service(), TerminalSessionClient {
         }.start()
     }
 
-    private fun startForegroundWithNotification() {
+    private fun exitAll() {
+        floating?.hide()
+        floating = null
+        minimized = false
+        listener?.onSessionFinished()
+        stopCurrent { stopForeground(true); stopSelf() }
+    }
+
+    /** Called by the Activity when it goes away: don't leave an idle foreground service behind. */
+    fun stopIfIdle() {
+        if (session == null && !preparing) { stopForeground(true); stopSelf() }
+    }
+
+    // ------------------------------------------------------------------ presentation
+
+    /**
+     * Shows the running session according to the window mode: attaches it to the Activity (fullscreen)
+     * or opens the floating window. [restore] also brings back a minimized floating window.
+     */
+    fun present(restore: Boolean) {
+        val s = session ?: return
+        val cfg = AppConfig.load(this)
+        if (cfg.windowMode == WindowMode.FLOATING) {
+            if (!Settings.canDrawOverlays(this)) { listener?.onNeedOverlayPermission(); return }
+            if (restore) minimized = false
+            val fw = floating ?: FloatingWindow(this, this).also { floating = it }
+            fw.applyAppearance(cfg)
+            if (!minimized) fw.show(s)
+            updateNotification()
+            listener?.onFloatingShown()
+        } else {
+            floating?.hide()
+            minimized = false
+            updateNotification()
+            listener?.onSessionReady(s)
+        }
+    }
+
+    /** Settings screen applied a new configuration (already saved to prefs). */
+    private fun applyConfig(restart: Boolean) {
+        val cfg = AppConfig.load(this)
+        if (restart) {
+            launch(cfg)
+            return
+        }
+        Themes.apply(Themes.byId(cfg.themeId), session)
+        floating?.applyAppearance(cfg)
+        listener?.onAppearanceChanged(cfg)
+        if (session != null) present(false)
+    }
+
+    fun changeFont(delta: Int) {
+        val c = AppConfig.load(this)
+        val n = c.copy(fontSp = (c.fontSp + delta).coerceIn(6, 40))
+        if (n.fontSp == c.fontSp) return
+        n.save(this)
+        floating?.applyAppearance(n)
+        listener?.onAppearanceChanged(n)
+    }
+
+    // ------------------------------------------------------------------ FloatingWindow.Host
+
+    override fun hostMinimize() {
+        floating?.hide()
+        minimized = true
+        updateNotification()
+    }
+
+    override fun hostExit() = exitAll()
+
+    override fun hostSettings() {
+        startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    override fun hostFont(delta: Int) = changeFont(delta)
+
+    // ------------------------------------------------------------------ notification
+
+    private fun buildNotification(): Notification {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "Terminal session", NotificationManager.IMPORTANCE_LOW))
         }
+        fun svc(code: Int, action: String) = PendingIntent.getService(
+            this, code, Intent(this, TerminalService::class.java).setAction(action), PendingIntent.FLAG_UPDATE_CURRENT
+        )
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val exit = PendingIntent.getService(
-            this, 1, Intent(this, TerminalService::class.java).setAction(ACTION_EXIT),
+        val settings = PendingIntent.getActivity(
+            this, 1, Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val floatingMode = AppConfig.load(this).windowMode == WindowMode.FLOATING && session != null
+        val text = when {
+            preparing -> "Preparing…"
+            session == null -> "Idle"
+            minimized -> "Window minimized"
+            else -> "Session running"
+        }
         val b: Notification.Builder =
             if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
         b.setContentTitle("DebianLiveCD")
-            .setContentText("Session running")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
-            .setContentIntent(open)
+            .setContentIntent(if (minimized) svc(2, ACTION_RESTORE) else open)
             .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", exit)
-        startForeground(1, b.build())
+        if (floatingMode) {
+            if (minimized) b.addAction(android.R.drawable.ic_menu_view, "Restore", svc(2, ACTION_RESTORE))
+            else b.addAction(android.R.drawable.ic_menu_revert, "Minimize", svc(3, ACTION_MINIMIZE))
+        }
+        b.addAction(android.R.drawable.ic_menu_preferences, "Settings", settings)
+        b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", svc(4, ACTION_EXIT))
+        return b.build()
     }
 
-    // ---- TerminalSessionClient ----
-    override fun onTextChanged(changedSession: TerminalSession) { listener?.onScreenChanged() }
+    private fun updateNotification() {
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIF_ID, buildNotification())
+    }
+
+    // ------------------------------------------------------------------ TerminalSessionClient
+
+    override fun onTextChanged(changedSession: TerminalSession) {
+        listener?.onScreenChanged()
+        floating?.onScreenUpdated()
+    }
     override fun onTitleChanged(changedSession: TerminalSession) {}
     override fun onSessionFinished(finishedSession: TerminalSession) {
         if (finishedSession !== session) return // stale session we already replaced
         session = null
+        floating?.hide()
+        floating = null
+        minimized = false
         listener?.onSessionFinished()
         runCleanup { stopForeground(true); stopSelf() }
     }
@@ -175,7 +296,10 @@ class TerminalService : Service(), TerminalSessionClient {
         }
     }
     override fun onBell(session: TerminalSession) {}
-    override fun onColorsChanged(session: TerminalSession) { listener?.onColorsChanged() }
+    override fun onColorsChanged(session: TerminalSession) {
+        listener?.onColorsChanged()
+        floating?.invalidateColors()
+    }
     override fun onTerminalCursorStateChange(state: Boolean) {}
     override fun getTerminalCursorStyle(): Int? = null
     override fun logError(tag: String, message: String) { Log.e(tag, message) }
@@ -188,6 +312,11 @@ class TerminalService : Service(), TerminalSessionClient {
 
     companion object {
         const val CHANNEL = "terminal"
+        const val NOTIF_ID = 1
         const val ACTION_EXIT = "io.github.stringmanolo.DebianLiveCD4Android.EXIT"
+        const val ACTION_MINIMIZE = "io.github.stringmanolo.DebianLiveCD4Android.MINIMIZE"
+        const val ACTION_RESTORE = "io.github.stringmanolo.DebianLiveCD4Android.RESTORE"
+        const val ACTION_APPLY = "io.github.stringmanolo.DebianLiveCD4Android.APPLY"
+        const val EXTRA_RESTART = "restart"
     }
 }
