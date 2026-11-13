@@ -50,6 +50,37 @@ def get_deb(pk, name, work, x):
     return f"{name} {f['Version']} sha256={got} {MIRROR}/{f['Filename']}"
 
 
+def pick_kernel_pkg(depends):
+    """First dependency like linux-image-6.12.48+deb13-arm64 (not -unsigned/-dbg/-rt/-cloud variants)."""
+    for dep in re.split(r"[,|]", depends):
+        name = re.split(r"[ (|]", dep.strip())[0]
+        if name.startswith("linux-image-") and name.endswith("-arm64") and re.match(r"linux-image-\d", name):
+            return name
+    sys.exit(f"no linux-image-<version>-arm64 in Depends: {depends}")
+
+
+def raw_arm64_image(blob):
+    """Return a plain arm64 Image. Handles gzip and EFI zboot (compressed payload) wrappers."""
+    if blob[:2] == b"\x1f\x8b":
+        blob = gzip.decompress(blob)
+    if blob[:2] == b"MZ" and blob[4:8] == b"zimg":  # EFI zboot
+        off = int.from_bytes(blob[8:12], "little")
+        size = int.from_bytes(blob[12:16], "little")
+        kind = blob[24:56].split(b"\0")[0].decode()
+        payload = blob[off:off + size]
+        print("EFI zboot kernel, payload compression:", kind)
+        if kind.startswith("gzip"):
+            blob = gzip.decompress(payload)
+        elif kind.startswith(("xz", "lzma")):
+            blob = lzma.decompress(payload)
+        elif kind.startswith("zstd"):
+            blob = subprocess.run(["zstd", "-d", "-q", "-c"], input=payload, check=True,
+                                  stdout=subprocess.PIPE).stdout
+        else:
+            sys.exit(f"unsupported zboot compression: {kind}")
+    return blob
+
+
 def main():
     pk = index()
     work = Path(tempfile.mkdtemp())
@@ -57,15 +88,17 @@ def main():
     kx.mkdir(); bx.mkdir()
 
     meta = pk["linux-image-arm64"]
-    kname = next(m for m in re.findall(r"linux-image-[\d.]+-arm64\b", meta["Depends"]))
+    kname = pick_kernel_pkg(meta["Depends"])
+    print("kernel package:", kname)
     prov = [get_deb(pk, kname, work, kx), get_deb(pk, "busybox-static", work, bx)]
 
     # kernel
     vmlinuz = next(iter(sorted((kx / "boot").glob("vmlinuz-*"))))
-    blob = vmlinuz.read_bytes()
-    if blob[:2] == b"\x1f\x8b":
-        blob = gzip.decompress(blob)
-    print("kernel:", vmlinuz.name, "magic:", blob[:4], "arm64 Image magic ok:", blob[56:60] == b"ARM\x64")
+    blob = raw_arm64_image(vmlinuz.read_bytes())
+    ok = blob[56:60] == b"ARM\x64"
+    print("kernel:", vmlinuz.name, "size:", len(blob), "arm64 Image magic ok:", ok)
+    if not ok:
+        sys.exit("kernel is not a raw arm64 Image; QEMU direct boot would fail")
     ASSETS.mkdir(parents=True, exist_ok=True)
     (ASSETS / "Image").write_bytes(blob)
 
@@ -73,15 +106,16 @@ def main():
     ir = work / "ir"
     for d in ("bin", "dev", "proc", "sys", "lib/modules", "newroot", "etc"):
         (ir / d).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(bx / "bin/busybox", ir / "bin/busybox")
+    busybox = next(p for p in bx.rglob("busybox") if p.is_file() and p.parent.name == "bin")
+    shutil.copy2(busybox, ir / "bin/busybox")
     shutil.copy2(ROOT / "bash/vm/init", ir / "init")
     os.chmod(ir / "init", 0o755)
     os.chmod(ir / "bin/busybox", 0o755)
 
     found = []
     for mod in MODULES:
-        for pat in (f"**/{mod}.ko.xz", f"**/{mod}.ko.zst", f"**/{mod}.ko"):
-            hit = next(iter((kx / "lib/modules").glob(pat)), None)
+        for ext in (".ko.xz", ".ko.zst", ".ko"):
+            hit = next(iter(kx.rglob(mod + ext)), None)
             if not hit:
                 continue
             dst = ir / "lib/modules" / f"{mod}.ko"
