@@ -177,7 +177,6 @@ class TerminalService : Service(), TerminalSessionClient {
     override fun onBell(session: TerminalSession) {}
     override fun onColorsChanged(session: TerminalSession) { listener?.onColorsChanged() }
     override fun onTerminalCursorStateChange(state: Boolean) {}
-    override fun setTerminalShellPid(session: TerminalSession, pid: Int) {}
     override fun getTerminalCursorStyle(): Int? = null
     override fun logError(tag: String, message: String) { Log.e(tag, message) }
     override fun logWarn(tag: String, message: String) { Log.w(tag, message) }
