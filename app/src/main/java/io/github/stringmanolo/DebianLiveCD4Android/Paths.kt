@@ -11,8 +11,7 @@ import java.io.RandomAccessFile
 object Paths {
     const val ROOTFS_ASSET = "rootfs/debian-arm64.tar.xz"
 
-    fun systemRoot(ctx: Context) = File(ctx.filesDir, "rootfs/system")
-    fun livecdPersistRoot(ctx: Context) = File(ctx.filesDir, "rootfs/livecd-persist")
+    fun legacyRoot(ctx: Context, name: String) = File(ctx.filesDir, "rootfs/$name")
     fun ephemeralBase(ctx: Context) = File(ctx.filesDir, "eph")
     fun vmDir(ctx: Context) = File(ctx.filesDir, "vm")
     fun tmpDir(ctx: Context) = File(ctx.filesDir, "tmp")
@@ -23,31 +22,38 @@ object Paths {
     fun okMarker(root: File) = File(root.parentFile, root.name + ".ok")
 }
 
+enum class WipeMode { NONE, ZERO, RANDOM }
+
 object FsUtil {
     /** lstat-based existence check: true for dangling symlinks too. */
     fun exists(f: File): Boolean = try { Os.lstat(f.path); true } catch (e: Exception) { false }
 
     /** Recursive delete that never follows symlinks. */
-    fun deleteTree(f: File) = wipeTree(f, false)
+    fun deleteTree(f: File): Unit = wipeTree(f, false)
+
+    fun wipeTree(f: File, overwrite: Boolean): Unit = wipeTree(f, if (overwrite) WipeMode.RANDOM else WipeMode.NONE)
 
     /**
-     * Recursive delete that never follows symlinks. With [overwrite], regular files are zero-filled and
-     * fsync'ed before unlinking. NOTE: on flash storage (F2FS, wear levelling) this does NOT guarantee that
-     * old blocks are gone; real RAM-only operation is what VM mode is for.
+     * Recursive delete that never follows symlinks. With [mode] RANDOM regular files are overwritten in place with
+     * CSPRNG bytes (a throw-away AES-CTR key: "encrypt with a random key, then delete"), ZERO with zeros, and
+     * fsync'ed before unlinking. NOTE: on flash storage (F2FS, wear levelling) this does NOT guarantee that old
+     * blocks are gone; real RAM-only operation (VM mode) and crypto-shredding of encrypted archives do.
      */
-    fun wipeTree(f: File, overwrite: Boolean) {
+    fun wipeTree(f: File, mode: WipeMode) {
         val st = try { Os.lstat(f.path) } catch (e: Exception) { return }
         if (OsConstants.S_ISDIR(st.st_mode)) {
             try { Os.chmod(f.path, 448) } catch (_: Exception) {} // 0700
-            f.listFiles()?.forEach { wipeTree(it, overwrite) }
-        } else if (overwrite && OsConstants.S_ISREG(st.st_mode) && st.st_size > 0) {
+            f.listFiles()?.forEach { wipeTree(it, mode) }
+        } else if (mode != WipeMode.NONE && OsConstants.S_ISREG(st.st_mode) && st.st_size > 0) {
             try {
                 Os.chmod(f.path, 384) // 0600
+                val rnd = if (mode == WipeMode.RANDOM) RandomStream() else null
                 RandomAccessFile(f, "rw").use { raf ->
                     val buf = ByteArray(1 shl 16)
                     var left = st.st_size
                     while (left > 0) {
                         val n = minOf(left, buf.size.toLong()).toInt()
+                        rnd?.fill(buf, n)
                         raf.write(buf, 0, n)
                         left -= n
                     }

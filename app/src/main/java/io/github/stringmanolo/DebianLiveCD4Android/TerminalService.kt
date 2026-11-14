@@ -5,22 +5,27 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Binder
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 
 /**
- * Foreground service: prepares the environment (install / extract / copy / VM feeder), owns the terminal
- * session so it survives the Activity, hosts the floating window, and cleans up (wipes ephemeral data).
+ * Foreground service: prepares the environment (unlock / extract / copy / VM feeder), owns the terminal session so
+ * it survives the Activity, hosts the floating window, enforces the privacy options, and cleans up afterwards
+ * (re-packs systems, wipes ephemeral data, forgets keys).
  */
 class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
 
@@ -31,6 +36,8 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         /** The floating window took over; the Activity can close. */
         fun onFloatingShown()
         fun onNeedOverlayPermission()
+        fun onNeedPassphrase()
+        fun onNeedUnlock()
         fun onFailed(message: String)
         fun onScreenChanged()
         fun onColorsChanged()
@@ -54,14 +61,24 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         private set
 
     private var cleanup: (() -> Unit)? = null
+    private var cleanupThread: Thread? = null
     private var floating: FloatingWindow? = null
     private var minimized = false
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wipeStatus: String? = null
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            if (Cfg.closeOnScreenOff && session != null) exitAll()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
         startForeground(NOTIF_ID, buildNotification())
+        registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -70,12 +87,15 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
             ACTION_MINIMIZE -> hostMinimize()
             ACTION_RESTORE -> { minimized = false; present(true) }
             ACTION_APPLY -> applyConfig(intent.getBooleanExtra(EXTRA_RESTART, false))
+            ACTION_WIPE -> startWipe(intent.getBooleanExtra("force", false))
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         floating?.hide()
+        releaseWake()
         session?.finishIfRunning()
         super.onDestroy()
     }
@@ -89,10 +109,14 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         preparing = true
         lastError = null
         lastProgress = 0 to "Preparing…"
+        Cfg.lastOpened = System.currentTimeMillis()
+        try { NetBlockService.apply(this) } catch (_: Exception) {}
         updateNotification()
+        val waitFor = cleanupThread
         Thread {
             var plan: Plan? = null
             try {
+                waitFor?.join() // never prepare while the previous session is still being re-packed
                 val p = SessionPlanner.prepare(this, cfg) { pct, msg ->
                     lastProgress = pct to msg
                     main.post { listener?.onProgress(pct, msg) }
@@ -107,6 +131,8 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
                         preparing = false
                         lastProgress = null
                         minimized = false
+                        Cfg.sessionRunning = true
+                        acquireWake()
                         present(false)
                     } catch (t: Throwable) {
                         fail(p, t)
@@ -127,25 +153,39 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         cleanup = plan?.cleanup
         runCleanup {}
         updateNotification()
-        listener?.onFailed(lastError!!)
+        if (t is KeyLockedException) listener?.onNeedPassphrase() else listener?.onFailed(lastError!!)
     }
 
     private fun stopCurrent(then: () -> Unit = {}) {
         val s = session
         session = null // late callbacks of the old session are ignored (identity check)
         s?.finishIfRunning()
+        onSessionEnded()
         runCleanup(then)
     }
 
-    /** Runs the pending cleanup on a worker thread (wiping can take a while), then [then] on the main thread. */
+    private fun onSessionEnded() {
+        Cfg.sessionRunning = false
+        releaseWake()
+        if (Cfg.clearClipboardOnExit) clearClipboard()
+    }
+
+    /** Runs the pending cleanup on a worker thread (re-packing / wiping can take a while), then [then] on the main thread. */
     private fun runCleanup(then: () -> Unit) {
         val c = cleanup
         cleanup = null
-        if (c == null) { then(); return }
-        Thread {
-            try { c() } catch (t: Throwable) { Log.w("TerminalService", "cleanup failed: $t") }
-            main.post { then() }
-        }.start()
+        val prev = cleanupThread
+        if (c == null && (prev == null || !prev.isAlive)) { then(); return }
+        val t = Thread {
+            try { prev?.join() } catch (_: InterruptedException) {}
+            try { c?.invoke() } catch (t: Throwable) { Log.w("TerminalService", "cleanup failed: $t") }
+            main.post {
+                if (session == null && !preparing) KeyManager.lock()
+                then()
+            }
+        }
+        cleanupThread = t
+        t.start()
     }
 
     private fun exitAll() {
@@ -158,7 +198,53 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
 
     /** Called by the Activity when it goes away: don't leave an idle foreground service behind. */
     fun stopIfIdle() {
-        if (session == null && !preparing) { stopForeground(true); stopSelf() }
+        if (session == null && !preparing && wipeStatus == null) { stopForeground(true); stopSelf() }
+    }
+
+    private fun startWipe(force: Boolean) {
+        if (WipeManager.running || wipeStatus != null) return
+        if (!force && !Cfg.wipeEnabled) return
+        floating?.hide()
+        floating = null
+        minimized = false
+        wipeStatus = "Wiping…"
+        listener?.onSessionFinished()
+        stopCurrent {
+            Thread {
+                try {
+                    WipeManager.execute(this) { pct, msg ->
+                        wipeStatus = "$msg $pct%"
+                        main.post { updateNotification() }
+                    }
+                } catch (t: Throwable) {
+                    Log.w("TerminalService", "wipe failed: $t")
+                }
+                main.post { wipeStatus = null; Cfg.failedPins = 0; stopForeground(true); stopSelf() }
+            }.start()
+        }
+    }
+
+    // ------------------------------------------------------------------ wake lock / clipboard
+
+    private fun acquireWake() {
+        if (!Cfg.wakeLock || wakeLock != null) return
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DebianLiveCD:session").apply {
+            setReferenceCounted(false)
+            acquire(24 * 60 * 60 * 1000L)
+        }
+    }
+
+    private fun releaseWake() {
+        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        wakeLock = null
+    }
+
+    private fun clearClipboard() {
+        try {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            if (Build.VERSION.SDK_INT >= 28) cm.clearPrimaryClip() else cm.setPrimaryClip(ClipData.newPlainText("", ""))
+        } catch (_: Exception) {}
     }
 
     // ------------------------------------------------------------------ presentation
@@ -169,6 +255,12 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
      */
     fun present(restore: Boolean) {
         val s = session ?: return
+        if (AppLock.isLocked()) {
+            if (listener != null) listener?.onNeedUnlock()
+            else startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            return
+        }
+        Cfg.lastOpened = System.currentTimeMillis()
         val cfg = AppConfig.load(this)
         if (cfg.windowMode == WindowMode.FLOATING) {
             if (!Settings.canDrawOverlays(this)) { listener?.onNeedOverlayPermission(); return }
@@ -196,6 +288,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         Themes.apply(Themes.byId(cfg.themeId), session)
         floating?.applyAppearance(cfg)
         listener?.onAppearanceChanged(cfg)
+        updateNotification()
         if (session != null) present(false)
     }
 
@@ -244,6 +337,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         )
         val floatingMode = AppConfig.load(this).windowMode == WindowMode.FLOATING && session != null
         val text = when {
+            wipeStatus != null -> wipeStatus!!
             preparing -> "Preparing…"
             session == null -> "Idle"
             minimized -> "Window minimized"
@@ -252,16 +346,19 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         val b: Notification.Builder =
             if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
         b.setContentTitle("DebianLiveCD")
-            .setContentText(text)
+            .setContentText(if (Cfg.hideNotifContent) "Running" else text)
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setContentIntent(if (minimized) svc(2, ACTION_RESTORE) else open)
             .setOngoing(true)
-        if (floatingMode) {
-            if (minimized) b.addAction(android.R.drawable.ic_menu_view, "Restore", svc(2, ACTION_RESTORE))
-            else b.addAction(android.R.drawable.ic_menu_revert, "Minimize", svc(3, ACTION_MINIMIZE))
+        if (Cfg.hideNotifContent) b.setVisibility(Notification.VISIBILITY_SECRET)
+        if (wipeStatus == null) {
+            if (floatingMode) {
+                if (minimized) b.addAction(android.R.drawable.ic_menu_view, "Restore", svc(2, ACTION_RESTORE))
+                else b.addAction(android.R.drawable.ic_menu_revert, "Minimize", svc(3, ACTION_MINIMIZE))
+            }
+            b.addAction(android.R.drawable.ic_menu_preferences, "Settings", settings)
+            b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", svc(4, ACTION_EXIT))
         }
-        b.addAction(android.R.drawable.ic_menu_preferences, "Settings", settings)
-        b.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", svc(4, ACTION_EXIT))
         return b.build()
     }
 
@@ -282,13 +379,16 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         floating?.hide()
         floating = null
         minimized = false
+        onSessionEnded()
         listener?.onSessionFinished()
         runCleanup { stopForeground(true); stopSelf() }
     }
     override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
+        if (Cfg.blockClipboard) return
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("", text))
     }
     override fun onPasteTextFromClipboard(session: TerminalSession?) {
+        if (Cfg.blockClipboard) return
         val clip = (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
         if (clip != null && clip.itemCount > 0) {
             val t = clip.getItemAt(0).coerceToText(this).toString()
@@ -317,6 +417,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         const val ACTION_MINIMIZE = "io.github.stringmanolo.DebianLiveCD4Android.MINIMIZE"
         const val ACTION_RESTORE = "io.github.stringmanolo.DebianLiveCD4Android.RESTORE"
         const val ACTION_APPLY = "io.github.stringmanolo.DebianLiveCD4Android.APPLY"
+        const val ACTION_WIPE = "io.github.stringmanolo.DebianLiveCD4Android.WIPE"
         const val EXTRA_RESTART = "restart"
     }
 }

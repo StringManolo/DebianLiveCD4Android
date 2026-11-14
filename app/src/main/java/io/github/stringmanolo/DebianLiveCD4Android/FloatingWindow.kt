@@ -82,6 +82,7 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
     var isShown = false
         private set
     private var windowFocusable = false
+    private var wantKeyboard = false
 
     private var bg = Color.BLACK
     private var fg = Color.WHITE
@@ -200,6 +201,11 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
         panel.addView(inner, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
 
         root = object : FrameLayout(themed) {
+            override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+                super.onWindowFocusChanged(hasWindowFocus)
+                if (hasWindowFocus && this@FloatingWindow.wantKeyboard) this@FloatingWindow.showIme()
+            }
+
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
                 if (event.keyCode == KeyEvent.KEYCODE_BACK) {
                     if (event.action == KeyEvent.ACTION_UP) this@FloatingWindow.setWindowFocusable(false)
@@ -245,7 +251,14 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
 
     fun invalidateColors() { if (isShown) terminalView.invalidate() }
 
+    private fun applySecure() {
+        val secure = WindowManager.LayoutParams.FLAG_SECURE
+        lp.flags = if (Cfg.secureScreen) lp.flags or secure else lp.flags and secure.inv()
+        if (isShown) wm.updateViewLayout(root, lp)
+    }
+
     fun applyAppearance(cfg: AppConfig) {
+        applySecure()
         val th = Themes.byId(cfg.themeId)
         bg = th.bgInt
         fg = th.fgInt
@@ -340,8 +353,16 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
 
     private fun setWindowFocusable(on: Boolean) {
         windowFocusable = on
-        lp.flags = if (on) lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
-        else lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (on) {
+            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+            // ask the system to show the IME together with the focus change
+            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING or
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+        } else {
+            wantKeyboard = false
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+        }
         if (isShown) wm.updateViewLayout(root, lp)
         if (!on) {
             (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -349,12 +370,22 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
         }
     }
 
+    /** A tap on the terminal: take window focus (it is not focusable by default so it never blocks other apps), then show the IME. */
     private fun focusAndShowKeyboard() {
-        if (!windowFocusable) setWindowFocusable(true)
+        wantKeyboard = true
+        if (!windowFocusable) setWindowFocusable(true)   // wantKeyboard is reset by setWindowFocusable(false) only
+        wantKeyboard = true
+        terminalView.requestFocus()
+        if (root.hasWindowFocus()) showIme()             // otherwise onWindowFocusChanged does it
+    }
+
+    private fun showIme() {
+        wantKeyboard = false
         terminalView.requestFocus()
         terminalView.post {
-            (ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                .showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.restartInput(terminalView)
+            imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
         }
     }
 

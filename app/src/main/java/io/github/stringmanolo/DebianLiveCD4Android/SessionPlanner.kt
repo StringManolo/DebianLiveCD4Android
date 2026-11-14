@@ -3,7 +3,10 @@ package io.github.stringmanolo.DebianLiveCD4Android
 import android.content.Context
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.OutputStream
 
 /** A prepared environment: how to start the terminal session and how to clean up after it. */
 class Plan(
@@ -13,72 +16,94 @@ class Plan(
 
 /**
  * Turns (target, mode) into a runnable [Plan]. Runs on a background thread; may take a while
- * (install / extract / copy), reporting through [progress].
+ * (unlock / extract / copy), reporting through [progress].
  *
- * Storage areas never interfere with each other:
- *  - System   files/rootfs/system          written only by SYSTEM + NORMAL (and its one-time install)
- *  - LiveCD   files/rootfs/livecd-persist  written only by LIVECD + NORMAL
- *  - temp     files/eph/<id>                EPHEMERAL runs only; wiped on exit / next launch
- *  - VM       nothing on disk
- * Nothing is ever installed implicitly: System + EPHEMERAL/VM require an already installed System.
- * The only cross-access is explicit: a LiveCD session (proot modes) may bind the installed System at
- * /mnt/system when the user enables it, like a real live CD mounting the hard disk.
+ * Storage areas never interfere with each other (see [SystemStore]):
+ *  - a System is written only by SYSTEM + NORMAL, and only the *selected* one
+ *  - the LiveCD persistence is written only by LIVECD + NORMAL
+ *  - EPHEMERAL runs live in files/eph/<id> and are wiped on exit / next launch
+ *  - VM writes nothing to disk (encrypted systems are decrypted on the fly straight into the guest)
+ * Nothing is ever installed implicitly. The only cross-access is explicit: a LiveCD session may bind the selected
+ * System at /mnt/system when the user enables it.
  */
 object SessionPlanner {
 
-    fun prepare(ctx: Context, cfg: AppConfig, progress: (Int, String) -> Unit): Plan {
-        Ephemeral.sweep(ctx) // leftovers from crashed ephemeral sessions only
-        val installer = RootfsInstaller(ctx)
-        val sys = Paths.systemRoot(ctx)
+    private fun assetTar(ctx: Context): (OutputStream) -> Unit = { out ->
+        ctx.assets.open(Paths.ROOTFS_ASSET).use { raw ->
+            XZCompressorInputStream(BufferedInputStream(raw, 1 shl 16)).use { it.copyTo(out, 1 shl 16) }
+        }
+    }
 
-        fun installedSystemOrThrow(): File {
-            if (!installer.isInstalled(sys)) {
-                throw IllegalStateException(
-                    "The System is not installed. Choose System + Normal once to install it " +
-                        "(nothing is installed automatically)."
-                )
+    fun prepare(ctx: Context, cfg: AppConfig, progress: Progress): Plan {
+        Ephemeral.sweep(ctx) // leftovers from crashed ephemeral sessions only
+        SystemStore.migrateLegacy()
+        SystemStore.recover(progress)
+        val installer = RootfsInstaller(ctx)
+        val quiet: Progress = { _, _ -> }
+
+        fun activeSystem(): String {
+            val id = Cfg.activeSystem
+            if (id.isEmpty() || SystemStore.info(id)?.installed != true) {
+                throw IllegalStateException("No system is selected. Create or select one in Settings > Systems (nothing is installed automatically).")
             }
-            return sys
+            return id
         }
 
-        /** LiveCD only: optional bind of the installed System. */
-        fun liveCdBinds(root: File): List<Pair<String, String>> {
-            if (!cfg.mountSystem || !installer.isInstalled(sys)) return emptyList()
+        /** LiveCD only: optionally open the selected System and bind it at /mnt/system. */
+        fun mountSelected(root: File): Pair<List<Pair<String, String>>, () -> Unit> {
+            val id = Cfg.activeSystem
+            if (!cfg.mountSystem || id.isEmpty() || SystemStore.info(id)?.installed != true) {
+                return Pair(emptyList<Pair<String, String>>(), {})
+            }
+            val sysRoot = SystemStore.openWorking(id, progress)
             File(root, "mnt/system").mkdirs()
-            return listOf(sys.absolutePath to "/mnt/system")
+            val close: () -> Unit = { SystemStore.closeWorking(id, quiet) }
+            return Pair(listOf(sysRoot.absolutePath to "/mnt/system"), close)
         }
 
         return when (cfg.mode) {
             Mode.NORMAL -> {
                 if (cfg.target == Target.SYSTEM) {
-                    if (!installer.isInstalled(sys)) installer.installFromAsset(sys, progress) // explicit choice
-                    Plan({ c -> ProotLauncher.createSession(ctx, sys, c) }, {})
+                    val id = activeSystem()
+                    val root = SystemStore.openWorking(id, progress)
+                    Plan({ c -> ProotLauncher.createSession(ctx, root, c) }, { SystemStore.closeWorking(id, quiet) })
                 } else {
-                    val root = Paths.livecdPersistRoot(ctx)
-                    if (!installer.isInstalled(root)) installer.installFromAsset(root, progress)
-                    val binds = liveCdBinds(root)
-                    Plan({ c -> ProotLauncher.createSession(ctx, root, c, binds) }, {})
+                    SystemStore.ensureLivecd(progress)
+                    val root = SystemStore.openWorking(SystemStore.LIVECD_ID, progress)
+                    val (binds, closeMount) = try { mountSelected(root) } catch (t: Throwable) {
+                        SystemStore.closeWorking(SystemStore.LIVECD_ID, quiet); throw t
+                    }
+                    Plan({ c -> ProotLauncher.createSession(ctx, root, c, binds) }, {
+                        SystemStore.closeWorking(SystemStore.LIVECD_ID, quiet)
+                        closeMount()
+                    })
                 }
             }
 
             Mode.EPHEMERAL -> {
                 val dir = Ephemeral.newDir(ctx)
                 var binds: List<Pair<String, String>> = emptyList()
+                var closeMount: () -> Unit = {}
                 try {
                     if (cfg.target == Target.SYSTEM) {
-                        val src = installedSystemOrThrow() // read-only use: copied, never modified
                         progress(0, "Copying system to a temporary directory…")
-                        FsUtil.copyTree(src, dir) { n -> progress(50, "Copying system… $n files") }
+                        SystemStore.extractInto(activeSystem(), dir, progress) // read-only use of the source
                     } else {
                         installer.extractAsset(dir, progress)
-                        binds = liveCdBinds(dir)
+                        val m = mountSelected(dir)
+                        binds = m.first
+                        closeMount = m.second
                     }
                 } catch (t: Throwable) {
-                    FsUtil.wipeTree(dir, false)
+                    FsUtil.wipeTree(dir, WipeMode.NONE)
                     throw t
                 }
                 val b = binds
-                Plan({ c -> ProotLauncher.createSession(ctx, dir, c, b) }, { FsUtil.wipeTree(dir, cfg.secureWipe) })
+                val cm = closeMount
+                Plan({ c -> ProotLauncher.createSession(ctx, dir, c, b) }, {
+                    FsUtil.wipeTree(dir, if (cfg.secureWipe) WipeMode.RANDOM else WipeMode.NONE)
+                    cm()
+                })
             }
 
             Mode.VM -> {
@@ -86,10 +111,16 @@ object SessionPlanner {
                 if (missing.isNotEmpty()) {
                     throw IllegalStateException("VM mode is not available in this build (missing: ${missing.joinToString()})")
                 }
-                val sysRoot = if (cfg.target == Target.SYSTEM) installedSystemOrThrow() else null
+                val writer: (OutputStream) -> Unit
+                if (cfg.target == Target.SYSTEM) {
+                    val id = activeSystem()
+                    writer = { out -> SystemStore.streamTar(id, out) }
+                } else {
+                    writer = assetTar(ctx)
+                }
                 progress(50, "Starting VM…")
                 QemuLauncher.prepareFiles(ctx)
-                val feeder = VmFeeder(ctx, sysRoot)
+                val feeder = VmFeeder(writer)
                 feeder.start()
                 Plan({ c -> QemuLauncher.createSession(ctx, cfg, feeder.port, c) }, { feeder.close() })
             }

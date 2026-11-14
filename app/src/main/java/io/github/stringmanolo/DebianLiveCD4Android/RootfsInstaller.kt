@@ -12,20 +12,12 @@ import org.apache.commons.compress.utils.CountingInputStream
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 
-/** Extracts the rootfs tarball shipped in assets (the "livecd" image) into a directory. No external tools. */
+/** Extracts tar streams (shipped image, archives, imports, downloads) into a directory. No external tools. */
 class RootfsInstaller(private val ctx: Context) {
 
-    fun isInstalled(root: File): Boolean = Paths.okMarker(root).exists()
-
-    /** Persistent install: wipes [root], extracts, then drops the "installed" marker. */
-    fun installFromAsset(root: File, onProgress: (Int, String) -> Unit) {
-        FsUtil.deleteTree(Paths.okMarker(root))
-        extractAsset(root, onProgress)
-        Paths.okMarker(root).apply { parentFile?.mkdirs(); writeText(System.currentTimeMillis().toString()) }
-    }
-
-    /** Extracts into [root] (created if needed). On failure the partial tree is removed. */
+    /** Extracts the shipped LiveCD image into [root] (wiped first). On failure the partial tree is removed. */
     fun extractAsset(root: File, onProgress: (Int, String) -> Unit) {
         FsUtil.deleteTree(root)
         root.mkdirs()
@@ -33,25 +25,41 @@ class RootfsInstaller(private val ctx: Context) {
             val raw = ctx.assets.open(Paths.ROOTFS_ASSET, AssetManager.ACCESS_STREAMING)
             val total = raw.available().toLong().coerceAtLeast(1L)
             val counting = CountingInputStream(raw)
-            var last = 0L
-            TarArchiveInputStream(XZCompressorInputStream(BufferedInputStream(counting, 1 shl 16))).use { tar ->
-                var e: TarArchiveEntry? = tar.nextTarEntry
-                while (e != null) {
-                    extract(tar, e, root)
-                    val now = System.currentTimeMillis()
-                    if (now - last > 150) {
-                        last = now
-                        onProgress((counting.bytesRead * 100 / total).toInt().coerceIn(0, 99), "Extracting ${e.name}")
-                    }
-                    e = tar.nextTarEntry
-                }
-            }
-            postSetup(root)
-            onProgress(100, "done")
+            val tar = XZCompressorInputStream(BufferedInputStream(counting, 1 shl 16))
+            extractTarStream(tar, root, onProgress, { counting.bytesRead }, total, true)
         } catch (t: Throwable) {
             FsUtil.deleteTree(root)
             throw t
         }
+    }
+
+    /**
+     * Extracts a plain tar [stream] into [root]. [bytesRead]/[total] drive the percentage when known.
+     * [setup] writes resolv.conf/hosts/apt config (skip it when the tree comes from an already prepared system).
+     */
+    fun extractTarStream(
+        stream: InputStream, root: File, onProgress: (Int, String) -> Unit,
+        bytesRead: (() -> Long)?, total: Long, setup: Boolean
+    ) {
+        root.mkdirs()
+        var last = 0L
+        var n = 0
+        TarArchiveInputStream(stream).use { tar ->
+            var e: TarArchiveEntry? = tar.nextTarEntry
+            while (e != null) {
+                extract(tar, e, root)
+                n++
+                val now = System.currentTimeMillis()
+                if (now - last > 150) {
+                    last = now
+                    val pct = if (bytesRead != null && total > 0) (bytesRead() * 100 / total).toInt().coerceIn(0, 99) else 50
+                    onProgress(pct, "Extracting… $n entries")
+                }
+                e = tar.nextTarEntry
+            }
+        }
+        if (setup) postSetup(root)
+        onProgress(100, "done")
     }
 
     private fun extract(tar: TarArchiveInputStream, e: TarArchiveEntry, root: File) {
@@ -100,8 +108,10 @@ class RootfsInstaller(private val ctx: Context) {
         File(root, "root").mkdirs()
         writeText(root, "etc/resolv.conf", "nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
         writeText(root, "etc/hosts", "127.0.0.1 localhost\n::1 localhost ip6-localhost\n")
-        // apt's sandbox user can't be switched to under proot
-        writeText(root, "etc/apt/apt.conf.d/01-android-nosandbox", "APT::Sandbox::User \"root\";\n")
+        // apt's sandbox user can't be switched to under proot (harmless on other distros)
+        if (File(root, "etc/apt").exists()) {
+            writeText(root, "etc/apt/apt.conf.d/01-android-nosandbox", "APT::Sandbox::User \"root\";\n")
+        }
     }
 
     private fun writeText(root: File, rel: String, text: String) {

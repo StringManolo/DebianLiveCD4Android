@@ -3,7 +3,7 @@
 
 Outputs (packaged as APK assets):
   app/src/main/assets/vm/Image             kernel (from Debian's linux-image-arm64)
-  app/src/main/assets/vm/initramfs.cpio.gz busybox + virtio modules + bash/vm/init
+  app/src/main/assets/vm/initramfs.bin busybox + virtio modules + bash/vm/init
 
 The initramfs does NOT contain the rootfs: the app streams it into the guest at boot (see VmFeeder.kt),
 so the same VM image serves both the shipped LiveCD and the installed System.
@@ -147,7 +147,7 @@ def main():
     cpio = subprocess.run(
         ["sudo", "sh", "-c", f"cd '{ir}' && find . | cpio -o -H newc -R 0:0 --quiet | gzip -9"],
         check=True, stdout=subprocess.PIPE).stdout
-    (ASSETS / "initramfs.cpio.gz").write_bytes(cpio)
+    (ASSETS / "initramfs.bin").write_bytes(cpio)
 
     INFO.mkdir(exist_ok=True)
     with open(INFO / "vm-provenance.txt", "w") as fh:

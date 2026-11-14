@@ -41,6 +41,7 @@ echo "[dlc] booting. Tip: run 'stty rows N cols M' to match your screen."
 exec switch_root /newroot /bin/sh -c '
 export HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 cd /root
-setsid -c /bin/bash --login
+if [ -x /bin/bash ]; then SH=/bin/bash; else SH=/bin/sh; fi
+setsid -c $SH -l 2>/dev/null || $SH -l
 echo o > /proc/sysrq-trigger
 '

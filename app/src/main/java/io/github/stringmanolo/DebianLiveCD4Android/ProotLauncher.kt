@@ -1,6 +1,8 @@
 package io.github.stringmanolo.DebianLiveCD4Android
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import java.io.File
@@ -29,13 +31,22 @@ object ProotLauncher {
         )
         for ((name, f) in fakeProc(ctx)) args += listOf("-b", "${f.absolutePath}:/proc/$name")
         for ((host, guest) in extraBinds) args += listOf("-b", "$host:$guest")
+        // shared storage is opt-in (Settings > Environment) and needs the Android permission, like termux-setup-storage
+        if (Cfg.storageAccess &&
+            ctx.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        ) {
+            File(root, "sdcard").mkdirs()
+            File(root, "root/storage/shared").mkdirs()
+            args += listOf("-b", "/storage/emulated/0:/sdcard", "-b", "/storage/emulated/0:/root/storage/shared")
+        }
+        val hasBash = FsUtil.exists(File(root, "usr/bin/bash")) || FsUtil.exists(File(root, "bin/bash"))
         args += listOf(
             "-w", "/root",
             "/usr/bin/env", "-i",
             "HOME=/root", "USER=root", "LOGNAME=root", "SHELL=/bin/bash",
             "TERM=xterm-256color", "COLORTERM=truecolor", "LANG=C.UTF-8",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "/bin/bash", "--login"
+            if (hasBash) "/bin/bash" else "/bin/sh", if (hasBash) "--login" else "-l"
         )
 
         val env = ArrayList<String>()

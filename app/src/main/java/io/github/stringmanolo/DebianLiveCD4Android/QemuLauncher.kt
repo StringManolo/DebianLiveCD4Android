@@ -16,7 +16,7 @@ object QemuLauncher {
         val m = ArrayList<String>()
         if (!File(Paths.nativeLibDir(ctx), "libqemu.so").exists()) m += "libqemu.so"
         if (!hasAsset(ctx, "vm/Image")) m += "asset vm/Image"
-        if (!hasAsset(ctx, "vm/initramfs.cpio.gz")) m += "asset vm/initramfs.cpio.gz"
+        if (!hasAsset(ctx, "vm/initramfs.bin")) m += "asset vm/initramfs.bin"
         return m
     }
 
@@ -32,7 +32,7 @@ object QemuLauncher {
             "libproot.so: ${yn(p.exists())}\n" +
             "libqemu.so: ${if (q.exists()) "yes (${q.length() / 1024} KB)" else "NO"}\n" +
             "asset vm/Image: ${yn(hasAsset(ctx, "vm/Image"))}\n" +
-            "asset vm/initramfs.cpio.gz: ${yn(hasAsset(ctx, "vm/initramfs.cpio.gz"))}\n" +
+            "asset vm/initramfs.bin: ${yn(hasAsset(ctx, "vm/initramfs.bin"))}\n" +
             "asset rootfs/debian-arm64.tar.xz: ${yn(hasAsset(ctx, Paths.ROOTFS_ASSET))}"
     }
 
@@ -42,8 +42,8 @@ object QemuLauncher {
         val stamp = ctx.packageManager.getPackageInfo(ctx.packageName, 0).lastUpdateTime.toString()
         val marker = File(dir, "version")
         if (marker.exists() && marker.readText() == stamp && File(dir, "Image").exists()) return dir
-        for (n in listOf("Image", "initramfs.cpio.gz")) {
-            ctx.assets.open("vm/$n").use { i -> FileOutputStream(File(dir, n)).use { o -> i.copyTo(o, 1 shl 16) } }
+        for ((n, asset) in listOf("Image" to "Image", "initramfs.cpio.gz" to "initramfs.bin")) {
+            ctx.assets.open("vm/$asset").use { i -> FileOutputStream(File(dir, n)).use { o -> i.copyTo(o, 1 shl 16) } }
         }
         marker.writeText(stamp)
         return dir
@@ -65,12 +65,15 @@ object QemuLauncher {
             "-display", "none", "-monitor", "none", "-no-reboot",
             // console on the pty; signal=off so Ctrl-C reaches the guest instead of killing QEMU
             "-chardev", "stdio,id=con,signal=off", "-serial", "chardev:con",
-            "-netdev", "user,id=n0", "-device", "virtio-net-device,netdev=n0",
             // rootfs channel: QEMU connects to VmFeeder; guest sees it as /dev/vport0p1
             "-device", "virtio-serial-device",
             "-chardev", "socket,id=rootfs,host=127.0.0.1,port=$feederPort",
             "-device", "virtserialport,chardev=rootfs,name=rootfs"
         )
+        if (Cfg.allowNetwork && Cfg.vmNic) {
+            // user-mode (slirp) networking; without this the guest has no network device at all
+            args += listOf("-netdev", "user,id=n0", "-device", "virtio-net-device,netdev=n0")
+        }
         val env = arrayOf(
             "LD_LIBRARY_PATH=$lib",
             "PATH=/system/bin",

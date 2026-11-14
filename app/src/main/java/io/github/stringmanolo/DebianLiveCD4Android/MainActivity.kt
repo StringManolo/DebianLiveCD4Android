@@ -1,6 +1,7 @@
 package io.github.stringmanolo.DebianLiveCD4Android
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -11,11 +12,15 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
+import android.text.InputType
 import android.view.View
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 
@@ -34,9 +39,12 @@ class MainActivity : Activity(), TerminalService.Listener {
     private var bound = false
     private var promptedFirstRun = false
     private var waitingOverlay = false
+    private var pinShowing = false
+    private var expectReturn = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applySecure()
         setContentView(R.layout.activity_main)
         rootView = findViewById(R.id.root)
         terminalView = findViewById(R.id.terminal_view)
@@ -59,11 +67,22 @@ class MainActivity : Activity(), TerminalService.Listener {
 
     override fun onResume() {
         super.onResume()
+        expectReturn = false
         terminalView.onScreenUpdated()
-        if (waitingOverlay && Settings.canDrawOverlays(this)) {
-            waitingOverlay = false
-            service?.present(true)
+        if (AppLock.isLocked()) {
+            requestPin()
+        } else {
+            AppLock.touch()
+            if (waitingOverlay && Settings.canDrawOverlays(this)) {
+                waitingOverlay = false
+                service?.present(true)
+            }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!expectReturn && !pinShowing) AppLock.onLeftForeground()
     }
 
     override fun onDestroy() {
@@ -72,6 +91,36 @@ class MainActivity : Activity(), TerminalService.Listener {
         if (bound) { unbindService(connection); bound = false }
         super.onDestroy()
     }
+
+    private fun applySecure() {
+        if (Cfg.secureScreen) window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+    }
+
+    // ------------------------------------------------------------------ PIN
+
+    private fun requestPin() {
+        if (pinShowing) return
+        pinShowing = true
+        rootView.visibility = View.INVISIBLE
+        startActivityForResult(Intent(this, PinActivity::class.java), REQ_PIN)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PIN) {
+            pinShowing = false
+            if (resultCode == RESULT_OK) {
+                rootView.visibility = View.VISIBLE
+                AppLock.touch()
+                service?.present(true)
+            } else {
+                finish()
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ service
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -101,7 +150,10 @@ class MainActivity : Activity(), TerminalService.Listener {
         override fun onServiceDisconnected(name: ComponentName) { service = null }
     }
 
-    private fun openSettings() { startActivity(Intent(this, SettingsActivity::class.java)) }
+    private fun openSettings() {
+        expectReturn = true
+        startActivity(Intent(this, SettingsActivity::class.java))
+    }
 
     private fun attachFullscreen(session: TerminalSession) {
         installPanel.visibility = View.GONE
@@ -135,6 +187,7 @@ class MainActivity : Activity(), TerminalService.Listener {
         terminalView.setTypeface(
             if (cfg.fontBold) Typeface.create(Typeface.MONOSPACE, Typeface.BOLD) else Typeface.MONOSPACE
         )
+        applySecure()
         terminalView.onScreenUpdated()
     }
 
@@ -147,6 +200,7 @@ class MainActivity : Activity(), TerminalService.Listener {
     override fun onProgress(percent: Int, message: String) = showPanel(percent, message)
     override fun onSessionReady(session: TerminalSession) = attachFullscreen(session)
     override fun onFloatingShown() { finish() }
+    override fun onNeedUnlock() = requestPin()
     override fun onNeedOverlayPermission() {
         waitingOverlay = true
         showPanel(
@@ -154,9 +208,31 @@ class MainActivity : Activity(), TerminalService.Listener {
             "Floating window mode needs the \"Display over other apps\" permission.",
             "Grant permission"
         ) {
+            expectReturn = true
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
         }
     }
+    override fun onNeedPassphrase() {
+        showPanel(0, "This system is encrypted. Enter your passphrase to unlock it.", "Enter passphrase") { askPassphrase() }
+        askPassphrase()
+    }
+
+    private fun askPassphrase() {
+        val e = EditText(this)
+        e.hint = "Passphrase"
+        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        AlertDialog.Builder(this).setTitle("Unlock encryption key").setView(e)
+            .setPositiveButton("Unlock") { _, _ ->
+                if (KeyManager.unlock(e.text.toString().toCharArray())) {
+                    showPanel(0, "Preparing…")
+                    service?.launch(AppConfig.load(this))
+                } else {
+                    Toast.makeText(this, "Wrong passphrase", Toast.LENGTH_LONG).show()
+                    askPassphrase()
+                }
+            }.setNegativeButton("Cancel", null).show()
+    }
+
     override fun onFailed(message: String) {
         showPanel(0, "Could not start:\n$message\n\nOpen ⚙ to change the environment.", "Retry") {
             showPanel(0, "Preparing…")
@@ -167,4 +243,6 @@ class MainActivity : Activity(), TerminalService.Listener {
     override fun onColorsChanged() { terminalView.invalidate() }
     override fun onSessionFinished() { finish() }
     override fun onAppearanceChanged(cfg: AppConfig) = applyAppearance(cfg)
+
+    companion object { private const val REQ_PIN = 11 }
 }
