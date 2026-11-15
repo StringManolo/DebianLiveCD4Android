@@ -70,11 +70,16 @@ mkdir -p /newroot/dev/pts /newroot/dev/shm
 mount -t devpts devpts /newroot/dev/pts
 mount -t tmpfs tmpfs /newroot/dev/shm
 
-echo "[dlc] booting. Tip: run 'stty rows N cols M' to match your screen."
-exec switch_root /newroot /bin/sh -c '
+# keep a static busybox inside the new root (RAM only): its cttyhack gives the shell a real controlling terminal,
+# which a plain "sh" started as PID 1 does not have (no job control, Ctrl-C does not work).
+mkdir -p /newroot/.dlc
+cp /bin/busybox /newroot/.dlc/busybox
+
+echo "[dlc] rootfs ready, switching root. Tip: run 'stty rows N cols M' to match your screen."
+exec switch_root /newroot /.dlc/busybox sh -c '
 export HOME=/root TERM=xterm-256color LANG=C.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 cd /root
 if [ -x /bin/bash ]; then SH=/bin/bash; else SH=/bin/sh; fi
-setsid -c $SH -l 2>/dev/null || $SH -l
-echo o > /proc/sysrq-trigger
+echo "[dlc] starting $SH (this is PID 1: leaving it powers the VM off)"
+exec /.dlc/busybox cttyhack $SH -l
 '

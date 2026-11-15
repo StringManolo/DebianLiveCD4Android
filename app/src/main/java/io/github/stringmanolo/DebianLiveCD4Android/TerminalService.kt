@@ -102,6 +102,13 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
             ACTION_RESTORE -> { minimized = false; present(true) }
             ACTION_APPLY -> applyConfig(intent.getBooleanExtra(EXTRA_RESTART, false))
             ACTION_WIPE -> startWipe(intent.getBooleanExtra("force", false))
+            ACTION_RESET_WINDOW -> {
+                FloatState.defaults(this).save(this)
+                floating?.resetToDefaults()
+                if (minimized) { minimized = false; present(true) }
+                // started only for this: don't leave an idle foreground service behind
+                if (session == null && !preparing && listener == null) { stopForeground(true); stopSelf() }
+            }
         }
         return START_NOT_STICKY
     }
@@ -492,6 +499,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         const val ACTION_RESTORE = "io.github.stringmanolo.DebianLiveCD4Android.RESTORE"
         const val ACTION_APPLY = "io.github.stringmanolo.DebianLiveCD4Android.APPLY"
         const val ACTION_WIPE = "io.github.stringmanolo.DebianLiveCD4Android.WIPE"
+        const val ACTION_RESET_WINDOW = "io.github.stringmanolo.DebianLiveCD4Android.RESET_WINDOW"
         const val EXTRA_RESTART = "restart"
     }
 }

@@ -211,5 +211,3 @@ app/src/main/jniLibs/
 app/src/main/assets/rootfs/
 app/src/main/assets/vm/
 build-info/
-
-./*.zip

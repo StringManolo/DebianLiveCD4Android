@@ -178,6 +178,10 @@ class SettingsActivity : Activity() {
         if (work.windowMode == WindowMode.FLOATING) {
             ui.note(p, "Needs \"Display over other apps\" (you will be asked). Minimize with —; restore from the notification.")
         }
+        ui.button(p, "Reset floating window (size, position, rotation, opacity, pin)", 6) {
+            startService(Intent(this, TerminalService::class.java).setAction(TerminalService.ACTION_RESET_WINDOW))
+            ui.toast("Floating window reset to its defaults.")
+        }
 
         ui.header(p, "While running")
         ui.check(p, "Keep the CPU awake (wake lock)", Cfg.wakeLock) { Cfg.wakeLock = it }

@@ -70,6 +70,11 @@ unavailable and shows a diagnostics block.
   it), the VM gets no NIC, and the app does not download or open the browser.
 - **Updates**: none / manual (opens the releases page) / automatic (default every 8 h: check, download, offer install).
 
+VM notes: the guest boots a Debian arm64 kernel under QEMU TCG (software emulation, no KVM), so expect roughly 10-40 s to
+the prompt on a phone even for a tiny rootfs like Alpine; the rootfs transfer itself takes seconds. If the console stops
+at a `[dlc]` message for minutes, something is wrong and the rescue shell / last message tells which step. Typing `exit`
+in the guest shell (PID 1) powers the VM off, which ends the session.
+
 Robustness: the app never closes by itself. If a session ends (you type `exit`, a VM powers off, a start fails) it stays
 open with Restart / Settings buttons, and after a failed or very short session it does not relaunch automatically (no
 crash loops). Systems are re-packed (compressed / encrypted) before the service stops, and the plain tree is invalidated

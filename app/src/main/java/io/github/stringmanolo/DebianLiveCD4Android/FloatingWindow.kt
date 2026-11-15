@@ -42,6 +42,15 @@ class FloatState(
     }
 
     companion object {
+        fun defaults(ctx: Context): FloatState {
+            val dm = ctx.resources.displayMetrics
+            return FloatState(
+                (12 * dm.density).toInt(), (72 * dm.density).toInt(),
+                minOf(dm.widthPixels * 0.92f, 420f * dm.density), 320f * dm.density,
+                0f, 1f, false
+            )
+        }
+
         fun load(ctx: Context): FloatState {
             val dm = ctx.resources.displayMetrics
             val sp = ctx.getSharedPreferences("float", Context.MODE_PRIVATE)
@@ -124,6 +133,9 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
         lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
 
         extraKeys.sessionProvider = { session }
+        // Without these the terminal can never get view focus: no keyboard, no input connection, no key navigation.
+        terminalView.isFocusable = true
+        terminalView.isFocusableInTouchMode = true
         // take window focus on the very first touch so it is already focused when the tap completes
         terminalView.setOnTouchListener { _, ev ->
             if (ev.actionMasked == MotionEvent.ACTION_DOWN && !windowFocusable) setWindowFocusable(true)
@@ -241,11 +253,34 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
         if (!isShown) {
             windowFocusable = false
             lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            ensureVisible()
             applyGeometry(false)
             wm.addView(root, lp)
             isShown = true
         }
         terminalView.onScreenUpdated()
+    }
+
+    /** Back to the default size, position, rotation, opacity and unpinned. */
+    fun resetToDefaults() {
+        val d = FloatState.defaults(ctx)
+        st.x = d.x; st.y = d.y; st.w = d.w; st.h = d.h; st.rot = d.rot; st.alpha = d.alpha; st.pinned = d.pinned
+        st.save(ctx)
+        seek.progress = ((st.alpha - 0.2f) * 100f).toInt().coerceIn(0, 80)
+        opacityRow.visibility = View.GONE
+        refreshPin()
+        applyGeometry()
+    }
+
+    /** If the window was dragged (almost) off the screen, bring it back. */
+    private fun ensureVisible() {
+        val dm = ctx.resources.displayMetrics
+        val (bw, bh) = bbox(st.w, st.h, st.rot)
+        val m = dp(56)
+        if (st.x + bw < m || st.x > dm.widthPixels - m || st.y + bh < m || st.y > dm.heightPixels - m) {
+            val d = FloatState.defaults(ctx)
+            st.x = d.x; st.y = d.y
+        }
     }
 
     fun hide() {
