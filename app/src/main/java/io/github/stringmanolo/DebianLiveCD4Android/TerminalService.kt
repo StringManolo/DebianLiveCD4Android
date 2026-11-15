@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import com.termux.terminal.TerminalSession
@@ -41,7 +42,10 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         fun onFailed(message: String)
         fun onScreenChanged()
         fun onColorsChanged()
-        fun onSessionFinished()
+        /** The session ended by itself (exit typed, crash, VM powered off...). The app stays open. */
+        fun onSessionEnded(message: String)
+        /** The user asked to leave (notification / window Exit): the app may close. */
+        fun onExitRequested()
         fun onAppearanceChanged(cfg: AppConfig)
     }
 
@@ -66,6 +70,15 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
     private var minimized = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var wipeStatus: String? = null
+    private var sessionStart = 0L
+    private var pendingEndReason: String? = null
+
+    private val netWatch = object : Runnable {
+        override fun run() {
+            if (session != null && !Cfg.allowNetwork && !NetBlockService.active) netLost()
+            if (session != null) main.postDelayed(this, 2000)
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -79,6 +92,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         super.onCreate()
         startForeground(NOTIF_ID, buildNotification())
         registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+        NetBlockService.onLost = { main.post { netLost() } }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,6 +108,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
 
     override fun onDestroy() {
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
+        NetBlockService.onLost = null
         floating?.hide()
         releaseWake()
         session?.finishIfRunning()
@@ -110,6 +125,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         lastError = null
         lastProgress = 0 to "Preparing…"
         Cfg.lastOpened = System.currentTimeMillis()
+        Cfg.autoLaunchBlocked = false
         try { NetBlockService.apply(this) } catch (_: Exception) {}
         updateNotification()
         val waitFor = cleanupThread
@@ -117,6 +133,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
             var plan: Plan? = null
             try {
                 waitFor?.join() // never prepare while the previous session is still being re-packed
+                NetBlockService.requireActive(this) // network off => the block must exist before anything runs
                 val p = SessionPlanner.prepare(this, cfg) { pct, msg ->
                     lastProgress = pct to msg
                     main.post { listener?.onProgress(pct, msg) }
@@ -132,7 +149,9 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
                         lastProgress = null
                         minimized = false
                         Cfg.sessionRunning = true
+                        sessionStart = SystemClock.elapsedRealtime()
                         acquireWake()
+                        if (!Cfg.allowNetwork) main.postDelayed(netWatch, 2000)
                         present(false)
                     } catch (t: Throwable) {
                         fail(p, t)
@@ -150,6 +169,8 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         preparing = false
         lastProgress = null
         lastError = t.message ?: t.javaClass.simpleName
+        Cfg.autoLaunchBlocked = true
+        Cfg.lastEnded = "Could not start: $lastError"
         cleanup = plan?.cleanup
         runCleanup {}
         updateNotification()
@@ -160,11 +181,11 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         val s = session
         session = null // late callbacks of the old session are ignored (identity check)
         s?.finishIfRunning()
-        onSessionEnded()
+        markSessionOver()
         runCleanup(then)
     }
 
-    private fun onSessionEnded() {
+    private fun markSessionOver() {
         Cfg.sessionRunning = false
         releaseWake()
         if (Cfg.clearClipboardOnExit) clearClipboard()
@@ -192,13 +213,14 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         floating?.hide()
         floating = null
         minimized = false
-        listener?.onSessionFinished()
+        listener?.onExitRequested()
         stopCurrent { stopForeground(true); stopSelf() }
     }
 
     /** Called by the Activity when it goes away: don't leave an idle foreground service behind. */
     fun stopIfIdle() {
-        if (session == null && !preparing && wipeStatus == null) { stopForeground(true); stopSelf() }
+        val packing = cleanupThread?.isAlive == true
+        if (session == null && !preparing && wipeStatus == null && !packing) { stopForeground(true); stopSelf() }
     }
 
     private fun startWipe(force: Boolean) {
@@ -208,7 +230,7 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
         floating = null
         minimized = false
         wipeStatus = "Wiping…"
-        listener?.onSessionFinished()
+        listener?.onExitRequested()
         stopCurrent {
             Thread {
                 try {
@@ -222,6 +244,41 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
                 main.post { wipeStatus = null; Cfg.failedPins = 0; stopForeground(true); stopSelf() }
             }.start()
         }
+    }
+
+    // ------------------------------------------------------------------ network block watchdog
+
+    /** The VPN block vanished while the network must be off: try to restore it, otherwise close the session (fail closed). */
+    private fun netLost() {
+        val s = session ?: return
+        if (Cfg.allowNetwork) return
+        try { NetBlockService.apply(this) } catch (_: Exception) {}
+        main.postDelayed({
+            if (!Cfg.allowNetwork && !NetBlockService.active && session === s) {
+                pendingEndReason = "The network block was lost (killed, or replaced by another VPN), so the session was closed " +
+                    "to avoid leaking traffic."
+                s.finishIfRunning()
+            }
+        }, 3000)
+    }
+
+    private fun postEndedNotification(msg: String) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(NotificationChannel("ended", "Session ended", NotificationManager.IMPORTANCE_DEFAULT))
+        }
+        val open = PendingIntent.getActivity(
+            this, 5, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val b: Notification.Builder =
+            if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, "ended") else Notification.Builder(this)
+        b.setContentTitle("DebianLiveCD")
+            .setContentText(if (Cfg.hideNotifContent) "Session ended" else msg)
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setContentIntent(open)
+            .setAutoCancel(true)
+        nm.notify(5, b.build())
     }
 
     // ------------------------------------------------------------------ wake lock / clipboard
@@ -375,13 +432,30 @@ class TerminalService : Service(), TerminalSessionClient, FloatingWindow.Host {
     override fun onTitleChanged(changedSession: TerminalSession) {}
     override fun onSessionFinished(finishedSession: TerminalSession) {
         if (finishedSession !== session) return // stale session we already replaced
+        val secs = (SystemClock.elapsedRealtime() - sessionStart) / 1000
+        val reason = pendingEndReason
+        pendingEndReason = null
+        val msg = reason ?: "Session ended after ${if (secs >= 60) "${secs / 60} min" else "$secs s"} (exit status ${finishedSession.exitStatus})."
         session = null
         floating?.hide()
         floating = null
         minimized = false
-        onSessionEnded()
-        listener?.onSessionFinished()
-        runCleanup { stopForeground(true); stopSelf() }
+        markSessionOver()
+        // a session that dies within seconds (bad VM, missing system...) must not be relaunched in a loop
+        if (reason != null || secs < 15) Cfg.autoLaunchBlocked = true
+        Cfg.lastEnded = msg
+        listener?.onProgress(50, "Saving and protecting the system…")
+        runCleanup {
+            // the app stays open so the user can read what happened, restart, or change the environment
+            if (listener != null) {
+                updateNotification()
+                listener?.onSessionEnded(msg)
+            } else {
+                postEndedNotification(msg)
+                stopForeground(true)
+                stopSelf()
+            }
+        }
     }
     override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
         if (Cfg.blockClipboard) return

@@ -33,6 +33,7 @@ class MainActivity : Activity(), TerminalService.Listener {
     private lateinit var installStatus: TextView
     private lateinit var installProgress: ProgressBar
     private lateinit var panelAction: Button
+    private lateinit var panelAction2: Button
     private lateinit var btnSettings: TextView
 
     private var service: TerminalService? = null
@@ -53,6 +54,7 @@ class MainActivity : Activity(), TerminalService.Listener {
         installStatus = findViewById(R.id.install_status)
         installProgress = findViewById(R.id.install_progress)
         panelAction = findViewById(R.id.btn_panel_action)
+        panelAction2 = findViewById(R.id.btn_panel_action2)
         btnSettings = findViewById(R.id.btn_settings)
         btnSettings.setOnClickListener { openSettings() }
 
@@ -141,6 +143,10 @@ class MainActivity : Activity(), TerminalService.Listener {
                 }
                 cur != null && cur.isRunning -> s.present(true)
                 s.lastError != null -> onFailed(s.lastError!!)
+                Cfg.autoLaunchBlocked -> showPanel2(
+                    (Cfg.lastEnded.ifEmpty { "The last session failed." }) + "\n\nNot restarting automatically.",
+                    "Retry", { retry() }, "Settings", { openSettings() }
+                )
                 else -> {
                     showPanel(0, "Preparing…")
                     s.launch(cfg)
@@ -173,6 +179,21 @@ class MainActivity : Activity(), TerminalService.Listener {
         } else {
             panelAction.visibility = View.GONE
         }
+        panelAction2.visibility = View.GONE
+    }
+
+    /** Panel with two buttons (used when a session ended or failed: the app never closes by itself). */
+    private fun showPanel2(msg: String, l1: String, a1: () -> Unit, l2: String, a2: () -> Unit) {
+        showPanel(0, msg, l1, a1)
+        panelAction2.text = l2
+        panelAction2.visibility = View.VISIBLE
+        panelAction2.setOnClickListener { a2() }
+    }
+
+    private fun retry() {
+        Cfg.autoLaunchBlocked = false
+        showPanel(0, "Preparing…")
+        service?.launch(AppConfig.load(this))
     }
 
     private fun applyAppearance(cfg: AppConfig) {
@@ -234,14 +255,15 @@ class MainActivity : Activity(), TerminalService.Listener {
     }
 
     override fun onFailed(message: String) {
-        showPanel(0, "Could not start:\n$message\n\nOpen ⚙ to change the environment.", "Retry") {
-            showPanel(0, "Preparing…")
-            service?.launch(AppConfig.load(this))
-        }
+        showPanel2("Could not start:\n$message", "Retry", { retry() }, "Settings", { openSettings() })
     }
     override fun onScreenChanged() { terminalView.onScreenUpdated() }
     override fun onColorsChanged() { terminalView.invalidate() }
-    override fun onSessionFinished() { finish() }
+    override fun onSessionEnded(message: String) {
+        showPanel2("$message\n\nThe app stays open so you can restart or change the environment.",
+            "Restart", { retry() }, "Settings", { openSettings() })
+    }
+    override fun onExitRequested() { finish() }
     override fun onAppearanceChanged(cfg: AppConfig) = applyAppearance(cfg)
 
     companion object { private const val REQ_PIN = 11 }

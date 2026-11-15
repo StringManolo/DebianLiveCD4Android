@@ -32,6 +32,22 @@ object WipeManager {
         return null
     }
 
+    /**
+     * Defense in depth: the wipe only ever deletes inside the app's private storage (filesDir/cacheDir). Shared storage
+     * (/sdcard, Downloads, DCIM...) is never listed, walked or deleted; symlinks are never followed; proot binds are not
+     * real mounts, so a bound /sdcard or /mnt/system is never reached through a system's directory.
+     */
+    private fun inApp(ctx: Context, f: File): Boolean {
+        val root = ctx.filesDir.canonicalPath
+        val p = try { f.canonicalPath } catch (e: Exception) { return false }
+        return p == root || p.startsWith("$root/")
+    }
+
+    private fun safeWipe(ctx: Context, f: File) {
+        if (!inApp(ctx, f)) { android.util.Log.w("WipeManager", "refusing to wipe outside the app: $f"); return }
+        FsUtil.wipeTree(f, WipeMode.RANDOM)
+    }
+
     fun execute(ctx: Context, progress: (Int, String) -> Unit) {
         if (running) return
         running = true
@@ -48,18 +64,18 @@ object WipeManager {
                 if (inCategory) {
                     dir.listFiles()?.forEach { c ->
                         val keep = !Cfg.wipeSnapshots && (c.name == "snapshots" || c.name == "meta.json")
-                        if (!keep) FsUtil.wipeTree(c, WipeMode.RANDOM)
+                        if (!keep) safeWipe(ctx, c)
                     }
                     if (Cfg.wipeSnapshots) dir.delete()
                     if (s.id == Cfg.activeSystem) Cfg.activeSystem = ""
                 } else if (Cfg.wipeSnapshots) {
-                    FsUtil.wipeTree(SystemStore.snapDir(s.id), WipeMode.RANDOM)
+                    safeWipe(ctx, SystemStore.snapDir(s.id))
                 }
             }
             // temporary material
-            Paths.ephemeralBase(ctx).listFiles()?.forEach { FsUtil.wipeTree(it, WipeMode.RANDOM) }
-            Paths.tmpDir(ctx).listFiles()?.forEach { FsUtil.wipeTree(it, WipeMode.RANDOM) }
-            File(ctx.filesDir, "rootfs").let { if (it.exists()) FsUtil.wipeTree(it, WipeMode.RANDOM) }
+            Paths.ephemeralBase(ctx).listFiles()?.forEach { safeWipe(ctx, it) }
+            Paths.tmpDir(ctx).listFiles()?.forEach { safeWipe(ctx, it) }
+            File(ctx.filesDir, "rootfs").let { if (it.exists()) safeWipe(ctx, it) }
 
             if (Cfg.wipeFillFree) FreeSpaceFill.run(ctx.filesDir) { pct, m -> progress(65 + pct * 35 / 100, m) }
 

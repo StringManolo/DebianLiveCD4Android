@@ -40,6 +40,7 @@ class NetBlockService : VpnService() {
                 .setBlocking(true)
                 .establish()
             fd = p
+            active = p != null
             if (p != null) {
                 reader = Thread({
                     val buf = ByteArray(32767)
@@ -54,15 +55,25 @@ class NetBlockService : VpnService() {
     }
 
     private fun stopBlocking() {
+        val was = active
+        active = false
         reader?.interrupt()
         try { fd?.close() } catch (_: Exception) {}
         fd = null
+        if (was && !Cfg.allowNetwork) onLost?.invoke()   // someone (or the system) killed the block while it must be on
     }
 
     override fun onDestroy() { stopBlocking(); super.onDestroy() }
     override fun onRevoke() { stopBlocking(); super.onRevoke() }
 
     companion object {
+        /** True only while the VPN interface really exists. */
+        @Volatile var active = false
+            private set
+
+        /** Called when the block disappears although the network must stay off (killed, revoked by another VPN...). */
+        @Volatile var onLost: (() -> Unit)? = null
+
         const val ACTION_STOP = "io.github.stringmanolo.DebianLiveCD4Android.NETBLOCK_STOP"
 
         /** Null if consent was already given; otherwise an Intent to launch for the system dialog. */
@@ -72,6 +83,29 @@ class NetBlockService : VpnService() {
             val i = Intent(ctx, NetBlockService::class.java)
             if (Cfg.allowNetwork) i.action = ACTION_STOP
             ctx.startService(i)
+        }
+
+        /**
+         * Fail closed: with the network disabled, a session must not start unless the block really exists.
+         * Blocks up to [timeoutMs] (call from a worker thread). Throws with the reason otherwise.
+         */
+        fun requireActive(ctx: Context, timeoutMs: Long = 5000) {
+            if (Cfg.allowNetwork || active) return
+            if (consentIntent(ctx) != null) {
+                throw IllegalStateException(
+                    "The network is disabled in Settings but the VPN permission is missing, so it cannot be enforced. " +
+                        "Open Settings > Network, enable and disable the network option again, and accept the VPN dialog."
+                )
+            }
+            apply(ctx)
+            val end = System.currentTimeMillis() + timeoutMs
+            while (!active && System.currentTimeMillis() < end) Thread.sleep(100)
+            if (!active) {
+                throw IllegalStateException(
+                    "The network is disabled in Settings but the network block could not be started " +
+                        "(another VPN may be active). Refusing to start the session without it."
+                )
+            }
         }
     }
 }

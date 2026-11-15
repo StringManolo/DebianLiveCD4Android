@@ -49,7 +49,7 @@ unavailable and shows a diagnostics block.
 
 ## Settings (tabs)
 
-- **Environment**: system / LiveCD, mode, VM RAM and cores, window mode, wake lock (off by default), opt-in access to
+- **Environment**: system / LiveCD, mode (VM is **experimental**), VM RAM and cores, window mode, wake lock (off by default), opt-in access to
   shared storage (`/sdcard`, `~/storage/shared`; needs the Android permission, like `termux-setup-storage`, but on demand).
 - **Systems**: several systems at once; create from the shipped Debian, import (tar, tar.gz, tar.xz, `.dlc`),
   download (Alpine, Ubuntu Base and Arch Linux ARM catalog with checksum verification where upstream publishes one, or any
@@ -69,6 +69,12 @@ unavailable and shows a diagnostics block.
 - **Network**: master switch. Off = a local VPN with no exit drops all traffic of the app (and of every process inside
   it), the VM gets no NIC, and the app does not download or open the browser.
 - **Updates**: none / manual (opens the releases page) / automatic (default every 8 h: check, download, offer install).
+
+Robustness: the app never closes by itself. If a session ends (you type `exit`, a VM powers off, a start fails) it stays
+open with Restart / Settings buttons, and after a failed or very short session it does not relaunch automatically (no
+crash loops). Systems are re-packed (compressed / encrypted) before the service stops, and the plain tree is invalidated
+before it is deleted, so an interrupted exit can never leave a half-deleted "valid" system; a leftover tree is re-packed
+on the next start.
 
 Limits worth knowing: proot is not a security boundary (use VM mode for isolation); overwriting on flash storage is best
 effort (crypto-shredding is the strong guarantee); Android never allows silent installs, so an update always needs your

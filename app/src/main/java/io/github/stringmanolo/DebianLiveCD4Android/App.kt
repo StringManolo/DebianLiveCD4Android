@@ -91,4 +91,8 @@ object Cfg {
     var wipeFillFree by BoolP("wipe_fill_free", false)
     var lastOpened by LongP("last_opened", 0L)
     var sessionRunning by BoolP("session_running", false)
+
+    // ---- crash-loop protection: after a failed / very short session the app does NOT relaunch by itself
+    var autoLaunchBlocked by BoolP("auto_blocked", false)
+    var lastEnded by StrP("last_ended", "")
 }

@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
@@ -123,6 +124,11 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
         lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
 
         extraKeys.sessionProvider = { session }
+        // take window focus on the very first touch so it is already focused when the tap completes
+        terminalView.setOnTouchListener { _, ev ->
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN && !windowFocusable) setWindowFocusable(true)
+            false
+        }
         terminalView.setTerminalViewClient(
             TermViewClient({ extraKeys }, { focusAndShowKeyboard() }, { d -> host.hostFont(d) })
         )
@@ -135,6 +141,7 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
         titleBar.orientation = LinearLayout.HORIZONTAL
         titleBar.gravity = Gravity.CENTER_VERTICAL
         titleBar.addView(titleText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        tool("⌨") { focusAndShowKeyboard() }
         tool("⚙") { host.hostSettings() }
         pinBtn = tool("PIN") { st.pinned = !st.pinned; refreshPin(); st.save(ctx) }
         tool("◐") {
@@ -382,11 +389,16 @@ class FloatingWindow(private val ctx: Context, private val host: Host) {
     private fun showIme() {
         wantKeyboard = false
         terminalView.requestFocus()
-        terminalView.post {
-            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        fun attempt() {
+            if (!isShown) return
             imm.restartInput(terminalView)
-            imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+            if (!imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)) imm.showSoftInput(terminalView, 0)
+            if (Build.VERSION.SDK_INT >= 30) terminalView.windowInsetsController?.show(WindowInsets.Type.ime())
         }
+        // the IME service needs a moment to see the new window focus: try now and again shortly after
+        terminalView.post { attempt() }
+        terminalView.postDelayed({ attempt() }, 250)
     }
 
     // ------------------------------------------------------------------ small helpers

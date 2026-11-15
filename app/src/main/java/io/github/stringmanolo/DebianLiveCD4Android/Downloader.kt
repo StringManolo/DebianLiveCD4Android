@@ -37,6 +37,14 @@ object Downloader {
         throw IOException("too many redirects")
     }
 
+    /** Download size in bytes from the response headers (-1 if the server does not say). The body is not read. */
+    fun size(url: String): Long {
+        val c = open(url)
+        val n = c.contentLengthLong
+        c.disconnect()
+        return n
+    }
+
     fun text(url: String): String = open(url).inputStream.bufferedReader().use { it.readText() }
 
     private fun firstHash(s: String): String? = Regex("[0-9a-fA-F]{64}").find(s)?.value
@@ -62,10 +70,10 @@ object Downloader {
     }
 
     val CATALOG = listOf(
-        Entry("Alpine Linux (latest stable, minirootfs, checksum verified)") { alpine() },
-        Entry("Ubuntu Base 24.04 LTS (checksum verified)") { ubuntu() },
-        Entry("Arch Linux ARM (latest, no checksum available)") {
-            Resolved("http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz", null, "Arch Linux ARM")
+        Entry("Alpine Linux, minirootfs (≈3 MB download, ≈10 MB installed; checksum verified)") { alpine() },
+        Entry("Ubuntu Base 24.04 LTS (≈30 MB download, ≈100 MB installed; checksum verified)") { ubuntu() },
+        Entry("Arch Linux ARM (≈500 MB download, ≈1.5 GB installed; no checksum available)") {
+            Resolved("https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz", null, "Arch Linux ARM")
         }
     )
 }

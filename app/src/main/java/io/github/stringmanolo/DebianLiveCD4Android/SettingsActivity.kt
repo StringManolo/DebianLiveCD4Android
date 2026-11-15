@@ -141,7 +141,7 @@ class SettingsActivity : Activity() {
         ui.header(p, "Mode")
         val modes = listOf(
             "Normal (persistent)", "Ephemeral (temporary copy, wiped on exit)",
-            if (missingVm.isEmpty()) "VM (QEMU, RAM only)" else "VM (unavailable: ${missingVm.joinToString()})"
+            if (missingVm.isEmpty()) "VM (QEMU, RAM only) — Experimental" else "VM (Experimental) — unavailable: ${missingVm.joinToString()}"
         )
         ui.radios(p, modes, work.mode.ordinal) {
             if (it == 2 && missingVm.isNotEmpty()) { ui.toast("VM is not available in this build"); show("env") }
@@ -204,10 +204,10 @@ class SettingsActivity : Activity() {
         t == Target.SYSTEM && m == Mode.NORMAL -> "Runs the active system; everything you change is kept."
         t == Target.SYSTEM && m == Mode.EPHEMERAL ->
             "Runs on a temporary copy of the active system; changes are discarded and the copy is wiped. The system itself is never modified. Flash storage may keep remnants: for no disk traces use VM."
-        t == Target.SYSTEM -> "The active system is streamed into a QEMU VM and lives only in RAM (decrypted on the fly if it is encrypted). Changes are lost on exit. Much slower than proot."
+        t == Target.SYSTEM -> "EXPERIMENTAL. The active system is streamed into a QEMU VM and lives only in RAM (decrypted on the fly if it is encrypted). Changes are lost on exit. Much slower than proot."
         m == Mode.NORMAL -> "The shipped image is extracted once and kept (LiveCD with persistence), separate from your systems."
         m == Mode.EPHEMERAL -> "A fresh copy of the shipped image on every start, wiped on exit."
-        else -> "The shipped image is streamed into a QEMU VM and lives only in RAM. Nothing is written to disk."
+        else -> "EXPERIMENTAL. The shipped image is streamed into a QEMU VM and lives only in RAM. Nothing is written to disk."
     }
 
     private fun apply() {
@@ -246,6 +246,7 @@ class SettingsActivity : Activity() {
         val p = ui.page()
         ui.header(p, "Systems", 0)
         ui.note(p, "Create, rename, duplicate, delete, import, export, download, snapshot and restore. Each system is stored on its own and never touches the others.")
+        val space = ui.note(p, "Free space: ${fmtBytes(filesDir.usableSpace)} · Systems use: calculating…", 6)
         ui.button(p, "New system from the shipped Debian") {
             if (busy()) return@button
             ui.prompt("New system", "Name", "Debian") { name ->
@@ -268,6 +269,7 @@ class SettingsActivity : Activity() {
         systemsList = list
         val all = SystemStore.list()
         if (all.isEmpty()) ui.note(list, "Nothing installed.")
+        val rows = ArrayList<Pair<SysInfo, TextView>>()
         for (s in all) {
             val state = when {
                 !s.installed -> "not installed"
@@ -284,7 +286,17 @@ class SettingsActivity : Activity() {
                 setOnClickListener { systemActions(s) }
             }
             list.addView(t, LinearLayout.LayoutParams(-1, -2).apply { topMargin = ui.dp(6) })
+            rows.add(Pair(s, t))
         }
+        Thread {
+            var total = 0L
+            for ((si, tv) in rows) {
+                val sz = SystemStore.sizeOf(si.id)
+                total += sz
+                runOnUiThread { if (currentTab == "systems") tv.text = tv.text.toString().replaceFirst("\n", "\n${fmtBytes(sz)} · ") }
+            }
+            runOnUiThread { if (currentTab == "systems") space.text = "Free space: ${fmtBytes(filesDir.usableSpace)} · Systems use: ${fmtBytes(total)}" }
+        }.start()
         return p
     }
 
@@ -352,29 +364,44 @@ class SettingsActivity : Activity() {
     private fun downloadDialog() {
         if (!Cfg.allowNetwork) { ui.toast("The network is disabled (Network tab)."); return }
         val labels = Downloader.CATALOG.map { it.label } + "Custom URL…"
-        ui.choose("Download a rootfs", labels) { i ->
+        ui.choose("Download a rootfs  (free space: ${fmtBytes(filesDir.usableSpace)})", labels) { i ->
             if (i == Downloader.CATALOG.size) {
                 val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0) }
                 val u = EditText(this).apply { hint = "https://…/rootfs.tar.gz" }
                 val h = EditText(this).apply { hint = "SHA-256 (optional but recommended)" }
                 box.addView(u); box.addView(h)
                 AlertDialog.Builder(this).setTitle("Custom rootfs URL").setView(box)
-                    .setPositiveButton("Download") { _, _ ->
+                    .setPositiveButton("Next") { _, _ ->
                         val url = u.text.toString().trim()
-                        if (url.startsWith("http")) runDownload(url, h.text.toString().trim().ifEmpty { null }, "Custom system")
+                        if (url.startsWith("http")) confirmDownload("Custom system", url, h.text.toString().trim().ifEmpty { null })
                         else ui.toast("Enter an http(s) URL")
                     }.setNegativeButton("Cancel", null).show()
             } else {
                 resolved = null
                 ui.job("Looking up…", { _ -> resolved = Downloader.CATALOG[i].resolve() }) { e ->
                     val r = resolved
-                    if (e == null && r != null) {
-                        ui.confirm("Download ${r.name}", "${r.url}\n\n" + (if (r.sha256 != null) "SHA-256 will be verified." else "No checksum available: the download is not verified."), "Download") {
-                            runDownload(r.url, r.sha256, r.name)
-                        }
-                    }
+                    if (e == null && r != null) confirmDownload(r.name, r.url, r.sha256)
                 }
             }
+        }
+    }
+
+    /** Shows the real download size, an estimate of the installed size and the free space, then asks. */
+    private fun confirmDownload(name: String, url: String, sha: String?) {
+        var size = -1L
+        ui.job("Checking size…", { _ -> size = Downloader.size(url) }) { e ->
+            if (e != null) return@job
+            val free = filesDir.usableSpace
+            val est = if (size > 0) size * 3 else -1L   // gz/xz rootfs tarballs typically unpack to ~3x
+            val low = est > 0 && free < est + 200L * 1024 * 1024
+            ui.confirm(
+                "Download $name",
+                "$url\n\nDownload: ${fmtBytes(size)}\nInstalled (estimate): ${if (est > 0) "≈ " + fmtBytes(est) else "unknown"}\n" +
+                    "Free space: ${fmtBytes(free)}\n" +
+                    (if (sha != null) "SHA-256 will be verified." else "No checksum: the download is not verified.") +
+                    (if (low) "\n\n⚠ There may not be enough free space." else ""),
+                if (low) "Download anyway" else "Download"
+            ) { runDownload(url, sha, name) }
         }
     }
 
@@ -622,6 +649,11 @@ class SettingsActivity : Activity() {
                 if (c != null) picker(c, REQ_VPN) else { Cfg.allowNetwork = false; NetBlockService.apply(this); show("net") }
             }
         }
+        ui.note(p, "Block status: " + when {
+            Cfg.allowNetwork -> "not needed (the network is allowed)"
+            NetBlockService.active -> "ACTIVE"
+            else -> "NOT ACTIVE: sessions refuse to start until it is (fail closed)"
+        }, 6)
         ui.note(p, "When off: every process of this app, including your Debian systems, cannot reach the network (a local VPN with no exit silently drops their traffic; Android asks for VPN consent once). The VM gets no network device. The app itself will not download rootfs, check for updates, or open the browser.")
         ui.note(p, "For a guarantee that survives this app being killed, enable Android's \"Always-on VPN\" and \"Block connections without VPN\" for DebianLiveCD in the system VPN settings.")
         ui.note(p, "Android cannot remove the INTERNET permission at runtime. A build without it can be produced on request.")
@@ -710,7 +742,7 @@ class SettingsActivity : Activity() {
                 val uri = data?.data
                 if (resultCode == RESULT_OK && uri != null) {
                     val (fn, size) = queryName(uri)
-                    ui.prompt("Import system", "Name", fn.substringBefore('.')) { name ->
+                    ui.prompt("Import system (file ${fmtBytes(size)}, free ${fmtBytes(filesDir.usableSpace)})", "Name", fn.substringBefore('.')) { name ->
                         ui.ensureKeyUnlocked {
                             ui.job("Importing", { prog ->
                                 val ins = contentResolver.openInputStream(uri) ?: throw java.io.IOException("cannot open the file")

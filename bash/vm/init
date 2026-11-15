@@ -7,18 +7,51 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 
+rescue() {
+  echo "[dlc] $1"
+  echo "--- /sys/bus/virtio/devices:"; ls -la /sys/bus/virtio/devices 2>&1
+  echo "--- /sys/class/virtio-ports:"; ls -la /sys/class/virtio-ports 2>&1
+  echo "--- /dev:"; ls /dev 2>&1 | head -60
+  echo "--- dmesg (tail):"; dmesg 2>&1 | tail -40
+  echo "[dlc] rescue shell (exit = power off)"
+  setsid cttyhack /bin/sh
+  echo o > /proc/sysrq-trigger
+  sleep 5
+}
+
 for m in failover net_failover virtio_mmio virtio_console virtio_net; do
-  [ -e /lib/modules/$m.ko ] && insmod /lib/modules/$m.ko 2>/dev/null
+  if [ -e /lib/modules/$m.ko ]; then
+    insmod /lib/modules/$m.ko || echo "[dlc] insmod $m failed (may be built in)"
+  fi
 done
 
+# The port number depends on how many virtio devices were probed first (vport<N>p1), so find it by its name.
+find_port() {
+  for d in /sys/class/virtio-ports/*; do
+    [ -r "$d/name" ] || continue
+    if [ "$(cat "$d/name")" = "rootfs" ]; then
+      echo "/dev/$(basename "$d")"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PORT=""
 i=0
-while [ ! -e /dev/vport0p1 ] && [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done
-[ -e /dev/vport0p1 ] || { echo "[dlc] rootfs channel not found"; echo o > /proc/sysrq-trigger; sleep 5; }
+while [ $i -lt 30 ]; do
+  PORT="$(find_port)" && break
+  PORT=""
+  sleep 1
+  i=$((i+1))
+done
+[ -n "$PORT" ] || rescue "rootfs channel not found"
+echo "[dlc] rootfs channel: $PORT"
 
 mount -t tmpfs -o size=90%,mode=755 tmpfs /newroot
 echo "[dlc] receiving rootfs into RAM..."
-tar -x -C /newroot -f /dev/vport0p1 || echo "[dlc] tar reported errors"
-[ -x /newroot/bin/sh ] || { echo "[dlc] rootfs looks empty"; echo o > /proc/sysrq-trigger; sleep 5; }
+tar -x -C /newroot -f "$PORT" || rescue "tar reported errors"
+[ -x /newroot/bin/sh ] || [ -L /newroot/bin/sh ] || rescue "rootfs looks empty"
 
 # user-mode (slirp) networking
 ip link set lo up

@@ -51,6 +51,13 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
         android:visibility="gone" />
+
+      <Button
+        android:id="@+id/btn_panel_action2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:visibility="gone" />
     </LinearLayout>
     <TextView
       android:id="@+id/btn_settings"

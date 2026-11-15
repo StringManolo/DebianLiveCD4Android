@@ -48,6 +48,11 @@ object SystemStore {
     fun hasArchive(id: String) = archive(id).exists()
     fun isInstalled(id: String) = plainReady(id) || hasArchive(id)
 
+    /** Bytes used on disk by a system (plain tree + archive + snapshots). Walks the tree: call off the main thread. */
+    fun sizeOf(id: String): Long = treeSize(dir(id))
+
+    fun totalSize(): Long = list().sumOf { sizeOf(it.id) }
+
     // ------------------------------------------------------------------ registry
 
     private fun readMeta(id: String): JSONObject? =
@@ -145,11 +150,13 @@ object SystemStore {
         try {
             val md = MessageDigest.getInstance("SHA-256")
             val dis = DigestInputStream(raw, md)
-            val counting = CountingInputStream(dis)
+            // the tar/decompressor chain closes its input when done; NoClose keeps [dis] readable to finish the digest
+            val counting = CountingInputStream(NoCloseInputStream(dis))
             val tar = Archive.sniff(BufferedInputStream(counting, 1 shl 16))
             RootfsInstaller(ctx).extractTarStream(tar, rootfs(info.id), progress, { counting.bytesRead }, total, true)
             val sink = ByteArray(1 shl 16)
             while (dis.read(sink) >= 0) { /* drain so the digest covers the whole file */ }
+            try { raw.close() } catch (_: Exception) {}
             val got = md.digest().joinToString("") { "%02x".format(it) }
             if (expectedSha256 != null && !got.equals(expectedSha256.trim(), ignoreCase = true)) {
                 throw IllegalStateException("SHA-256 mismatch (expected $expectedSha256, got $got)")
@@ -224,8 +231,8 @@ object SystemStore {
         val dek = if (pol.encrypt) KeyManager.dek() else null
         progress(0, "Protecting system (${if (pol.encrypt) "encrypting" else "compressing"})…")
         Archive.write(archive(id), pol.comp, dek) { TarWriter.write(rootfs(id), it) }
+        Paths.okMarker(rootfs(id)).delete()   // first: from now on the archive is the truth
         FsUtil.deleteTree(rootfs(id))
-        Paths.okMarker(rootfs(id)).delete()
     }
 
     private fun finalizeAtRest(id: String, progress: Progress) {
@@ -309,8 +316,8 @@ object SystemStore {
             FsUtil.deleteTree(tmp)
             throw t
         }
-        FsUtil.deleteTree(rootfs(id))
         Paths.okMarker(rootfs(id)).delete()
+        FsUtil.deleteTree(rootfs(id))
         archive(id).delete()
         tmp.renameTo(rootfs(id))
         Paths.okMarker(rootfs(id)).writeText("1")
@@ -347,7 +354,7 @@ object SystemStore {
             if (pol.needsArchive) {
                 if (plainReady(id) && !hasArchive(id)) {
                     Archive.write(archive(id), pol.comp, writeDek) { TarWriter.write(rootfs(id), it) }
-                    FsUtil.deleteTree(rootfs(id)); Paths.okMarker(rootfs(id)).delete()
+                    Paths.okMarker(rootfs(id)).delete(); FsUtil.deleteTree(rootfs(id))
                 } else if (hasArchive(id)) {
                     rewriteIfNeeded(archive(id), pol, readDek, writeDek, force)
                 }
