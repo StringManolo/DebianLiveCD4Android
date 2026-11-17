@@ -11,3 +11,4 @@
 - [ ] Simulated size quotas per system
 - [ ] VM: propagate terminal size to the guest
 - [ ] Optionally build proot from source in the workflow instead of using the Termux package
+- [ ] Add a "workflow" panel in settings to run from a file, save, manage, etc. This workflows are run over the base system selected, (it's an external install script to install tools, repos, etc)
